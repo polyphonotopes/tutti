@@ -1,0 +1,56 @@
+[package]
+name = "tutti-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+
+[features]
+default = []
+# Additive Merkle commitment/proof layer: the generic `ops_root`/`prove_op` over
+# the entry-hash identity set (canonical blake3-256 radix trie). Off by default so
+# the leaf profile can drop `radix_immutable`; walkie's own `merkle` feature turns
+# it on. The domain `state_root` (over `L::View: Canonical`) is NOT here yet — it
+# stays walkie-facing until the canonical-view bound is wired.
+merkle = ["dep:radix_immutable"]
+# Exposes the reference-oracle surface (`Store::view_reference`, `Store::dag`, and
+# the kernel `ReachIndex` `Reach` backend) so a downstream crate's equivalence tests
+# can drive the SAME fold on the Θ(N²) kernel index and assert the cheap lazy
+# `LazyReach` matches it. Pulls in the facts front door (`hhhs`), which production
+# tutti never names. Mirrors walkie's `test-support` pattern; carries no domain.
+test-support = ["dep:hhhs"]
+
+[dependencies]
+# Signed per-author op envelopes: header signing/verification, CBOR body framing.
+p2panda-core = "0.7"
+# The dependency-free causal floor tutti-core sits ATOP: opaque-payload DAG with fixed
+# entry identity, the `Reach` ancestry contract + lazy oracle, and the bounded
+# windowed store. Every production tutti import is a floor symbol. Pinned to the exact
+# rev walkie uses so entry hashes unify across the extraction.
+hhhs-dag = { git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "5802a25bf783324de321a918e93de88e3934124e", features = ["serde"] }
+# Convergence digest + Merkle commitments.
+blake3 = "=1.8.5"
+# Canonical blake3-256 radix trie for `ops_root`/`prove_op` (feature `merkle`).
+# Mirrors walkie's path pin so the trie types unify.
+radix_immutable = { path = "/laboratory/radix_immutable", features = ["merkle"], optional = true }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+# The facts front door (`cover::ReachIndex` + `register::resolve`) — reached ONLY by
+# the reference-oracle surface (feature `test-support`) and this crate's own tests,
+# never by production tutti. Same rev as `hhhs-dag`, so `hhhs::EntryHash` unifies with
+# `hhhs_dag::EntryHash`.
+hhhs = { git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "5802a25bf783324de321a918e93de88e3934124e", optional = true }
+
+# p2panda-core → ed25519-dalek → rand_core 0.6 → getrandom 0.2 must have the "js"
+# backend to COMPILE on wasm32-unknown-unknown (the crate's own compile_error).
+# Ed25519 signing is deterministic and tutti-core never generates keys, so this is
+# a build requirement, not a runtime one. In walkie's graph fastrand already turns
+# it on; declaring it here keeps tutti-core's standalone wasm build green. (The
+# getrandom-0.3 backend is set by the workspace `.cargo/config.toml` rustflag.)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+# The facts front door, unconditionally in the test build so this crate's own smoke +
+# equivalence tests can name `hhhs::cover::ReachIndex` / `hhhs::register` without the
+# `test-support` feature. Production builds still name only `hhhs-dag`.
+[dev-dependencies]
+hhhs = { git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "5802a25bf783324de321a918e93de88e3934124e" }

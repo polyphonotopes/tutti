@@ -1,0 +1,12 @@
+[package]
+name = "tutti-midi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+
+[dependencies]
+# The music protocol: tuning identity + pitch resolution — the only vocabulary
+# the ledger, input tracker, and reconcile core speak. The source key is the
+# app's own type, so no substrate dependency is needed here.
+tutti-music = { path = "../tutti-music" }
+thiserror = "2.0"

@@ -1,0 +1,21 @@
+[package]
+name = "tutti-music"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+
+[dependencies]
+# The reconciling signed-op substrate: `OpLanguage`/`FoldCtx`/`Store`, the
+# `causal_maxima` retention combinator, and the `EntryHash`/`AuthorId` identities
+# this protocol folds over.
+tutti-core = { path = "../tutti-core" }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+# TuningId — blake3 of the canonical tuning bytes. Pinned to walkie's exact rev so
+# tuning identities unify across the workspace.
+blake3 = "=1.8.5"
+
+# The reference-oracle surface (`Store::view_reference`) for the convergence and
+# compaction-equivalence suites — dev-only, production never names `hhhs`.
+[dev-dependencies]
+tutti-core = { path = "../tutti-core", features = ["test-support"] }
