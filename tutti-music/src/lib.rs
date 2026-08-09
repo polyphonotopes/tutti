@@ -40,7 +40,7 @@ pub mod tuning;
 
 pub use facets::{Envelope, Interp};
 pub use lang::{MusicLang, MusicView};
-pub use net::{LANE_STRATEGY_VERSION, MUSIC_RBSR_ALPN, MUSIC_STRATEGY_NAME};
+pub use net::{LANE_STRATEGY_VERSION, MUSIC_COURIER_ALPN, MUSIC_RBSR_ALPN, MUSIC_STRATEGY_NAME};
 pub use ops::MusicOp;
 pub use tuning::{TunedDegree, TunedPeriodicPitch, Tuning, TuningDefinition, TuningId};
 

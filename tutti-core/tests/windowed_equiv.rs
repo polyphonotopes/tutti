@@ -1245,17 +1245,61 @@ fn packed_summary_is_bounded_independent_of_n() {
         let ops = build_bounded_history(0x5233_A2C0, 3, steps);
         let n = ops.len();
 
-        // The compacting windowed leaf at a FIXED small window.
+        // The compacting windowed leaf at a FIXED small window, plus a from-genesis
+        // copy of its discard journal — what a fuller peer tracks so it can answer
+        // this leaf's courier requests after the leaf's own bounded journal (and
+        // discard-reach cache) have moved on.
         let mut w = WindowedStore::with_window(window);
+        let mut journal = JournalCopy::default();
         for s in &ops {
             w.ingest_verified(verified(s));
+            journal.harvest(&w);
         }
+
+        // The full store — correctness oracle, the M3.1 Θ(N²) baseline, and the
+        // courier responder's real reach oracle.
+        let full = ingest_full(&ops);
+
+        // Deep laggards the bounded discard-reach cache deferred (§4.5) are admitted
+        // through the production courier path: a REAL DiscardProof reconstructed
+        // from the tracked journal, verified by the floor against the leaf's own
+        // pinned discard root, plus the full peer's real ancestor sets. Deferred is
+        // never dropped: every parked op resolves here.
+        // One admission at a time, re-enumerating between rounds: resolving one
+        // deferral caches its prev's row as most-recent, which can lift OTHER
+        // deferred ops in the same drain and retire their candidates.
+        loop {
+            let Some(d) = w.retry_pending().courier.into_iter().next() else {
+                break;
+            };
+            let ctx = w.courier_context().expect("compaction profile");
+            let mut answers: HashMap<EntryHash, CourierAnswer> = HashMap::new();
+            for prev in &d.missing {
+                let proof = journal
+                    .prove(prev, ctx.discard_root)
+                    .expect("a from-genesis journal copy proves every discarded prev");
+                let reach = full.reach();
+                let ancestors: BTreeSet<EntryHash> = full
+                    .entry_hashes()
+                    .into_iter()
+                    .filter(|h| reach.is_ancestor(h, prev))
+                    .collect();
+                answers.insert(*prev, CourierAnswer { proof, ancestors });
+            }
+            w.lift_pending_via_courier(d.candidate, &ctx, &MapCourier(answers))
+                .expect("a genuine journal proof admits the deferred laggard");
+            // An admission can auto-compact, journaling a fresh batch.
+            journal.harvest(&w);
+        }
+        assert_eq!(
+            w.pending_len(),
+            0,
+            "N={n}: every courier deferral must resolve to a lift"
+        );
+
         // Final explicit cut so the measurement is the stable §3.4 residue reach matrix
         // (window empty): the cleanest bounded-summary snapshot.
         w.compact();
-
-        // The full store — correctness oracle + the M3.1 Θ(N²) baseline.
-        let full = ingest_full(&ops);
 
         // The bounded packing must still be EXACT, not merely small.
         assert_eq!(
@@ -1339,4 +1383,359 @@ fn packed_summary_is_bounded_independent_of_n() {
         last.0 / first.0.max(1),
         last.4 / first.4.max(1), first.4, last.4
     );
+}
+
+// ===========================================================================
+// M3.2 — the bounded discard journal and courier admission (§4.5).
+//
+// The wire half (frame codec, responder over an ALPN stream) lives with the
+// app's sync driver; what is proven HERE is the floor contract those pieces
+// stand on: `compact()` journals the exact discard batch it pinned, the journal
+// proves membership against the chained `discard_root` (and refuses once a
+// batch ages out — bounded memory, deferral stays safe), a deep laggard defers
+// instead of materializing, and `lift_pending_via_courier` admits it exactly —
+// or leaves the store untouched on a bad proof / stale context.
+// ===========================================================================
+
+use std::collections::HashMap;
+
+use tutti_core::{
+    Courier, CourierAnswer, CourierFault, DeferredLiftError, Digest, DiscardBatchSeq,
+    DiscardProof,
+};
+
+/// A map-backed §4.5 courier: answers gathered ahead of the lift call.
+struct MapCourier(HashMap<EntryHash, CourierAnswer>);
+
+impl Courier for MapCourier {
+    fn resolve_discarded(&self, prev: &EntryHash) -> Option<CourierAnswer> {
+        self.0.get(prev).cloned()
+    }
+}
+
+/// A from-genesis copy of a leaf's discard journal — the responder side of §4.5:
+/// what a fuller peer accumulates (batch by batch, in order) so it can reconstruct
+/// a [`DiscardProof`] for ANY op the leaf ever discarded, long after the leaf's own
+/// bounded journal has aged the batch out. Everything is a pure function of hashes
+/// the tracker copied, so its proofs verify against the leaf's live chained root.
+#[derive(Default)]
+struct JournalCopy {
+    batches: Vec<BTreeSet<EntryHash>>,
+    next_seq: u64,
+}
+
+impl JournalCopy {
+    /// Copy any newly journaled batches out of the leaf. Must run often enough that
+    /// no batch is evicted before it is seen — the seq continuity assert is the
+    /// tracker's honesty check.
+    fn harvest(&mut self, w: &WindowedStore<WinLang>) {
+        for batch in w.discard_batches() {
+            if batch.seq.0 < self.next_seq {
+                continue;
+            }
+            assert_eq!(batch.seq.0, self.next_seq, "journal copy missed a batch");
+            self.batches.push(batch.entries.iter().copied().collect());
+            self.next_seq += 1;
+        }
+    }
+
+    /// The chained discard root over every tracked batch (from the genesis zero).
+    fn root(&self) -> Digest {
+        let mut root = Digest([0u8; 32]);
+        for batch in &self.batches {
+            root = DiscardProof::fold_pinned(&root, &DiscardProof::batch_root(batch));
+        }
+        root
+    }
+
+    /// A membership proof for `member` against `expected_root`, reconstructed from
+    /// the tracked chain: the pinned value before `member`'s batch plus every later
+    /// batch root, exactly the shape [`DiscardProof::for_member`] consumes.
+    fn prove(&self, member: &EntryHash, expected_root: Digest) -> Option<DiscardProof> {
+        assert_eq!(
+            self.root(),
+            expected_root,
+            "tracked chain must reproduce the leaf's pinned discard root"
+        );
+        let idx = self.batches.iter().position(|b| b.contains(member))?;
+        let mut pinned_before = Digest([0u8; 32]);
+        for earlier in &self.batches[..idx] {
+            pinned_before =
+                DiscardProof::fold_pinned(&pinned_before, &DiscardProof::batch_root(earlier));
+        }
+        let later: Vec<Digest> = self.batches[idx + 1..]
+            .iter()
+            .map(DiscardProof::batch_root)
+            .collect();
+        DiscardProof::for_member(&self.batches[idx], member, pinned_before, later)
+    }
+}
+
+/// One deep-laggard fixture: author A writes `put` (retained wholesale), then
+/// `P = Add{0}` and the `r1 = Rem{0}` that kills it; `compact()` discards
+/// `{P, r1}` as one journaled batch, and with reach cap 1 the second discarded
+/// row evicts P's cached row. Offline author B then writes `X = Add{7}`
+/// observing P — a laggard whose only unresolved need is P's evicted reach.
+struct LaggardFixture {
+    leaf: WindowedStore<WinLang>,
+    full: Store<WinLang>,
+    p_entry: EntryHash,
+    x_id: OpId,
+    x_signed: SignedOp,
+}
+
+fn laggard_fixture() -> LaggardFixture {
+    let mut a = Author::new(0xA1);
+    let mut b = Author::new(0xB2);
+    let mut leaf = WindowedStore::<WinLang>::with_window_limits(64, 1, 8);
+    let mut full = Store::<WinLang>::new();
+
+    let (put, _put_id) = a.sign(TS_BASE, vec![], WinOp::Put { emoji: 3, pos: 40 });
+    let (p, p_id) = a.sign(TS_BASE + 1, vec![], WinOp::Add { key: 0 });
+    let (r1, _r1_id) = a.sign(TS_BASE + 2, vec![p_id], WinOp::Rem { key: 0 });
+    for signed in [&put, &p, &r1] {
+        leaf.ingest_verified(verified(signed));
+        full.ingest_verified(verified(signed));
+    }
+    let p_entry = leaf.lifted_entry(OpId(p_id)).expect("P lifted");
+
+    // The real compaction: `{P, r1}` is one non-empty discard batch; `put` is the
+    // retained residue. Reach cap 1 ⇒ the second discarded row (r1) evicts P's.
+    let stats = leaf.compact();
+    assert_eq!(stats.discarded, 2, "add + consumed remove discard");
+    assert_eq!(leaf.courier_gap_entries(), 1, "reach cap 1 enforced");
+    assert!(leaf.lifted_entry(OpId(p_id)).is_some(), "binding survives discard");
+
+    // Offline B saw P before the cut and now writes the deep laggard.
+    let (x_signed, x_id) = b.sign(TS_BASE + 10, vec![p_id], WinOp::Add { key: 7 });
+    full.ingest_verified(verified(&x_signed));
+
+    LaggardFixture {
+        leaf,
+        full,
+        p_entry,
+        x_id: OpId(x_id),
+        x_signed,
+    }
+}
+
+/// The genuine courier answer for the fixture's missing prev, built from the
+/// leaf's own journal proof plus the full peer's real reach oracle.
+fn genuine_answer(fx: &LaggardFixture) -> CourierAnswer {
+    let root = fx.leaf.discard_root().expect("compaction profile");
+    let proof = fx
+        .leaf
+        .prove_discarded_at(&fx.p_entry, root)
+        .expect("P's batch is retained in the journal");
+    assert!(proof.verifies(&fx.p_entry, &root), "journal proof must verify");
+    let reach = fx.full.reach();
+    let ancestors: BTreeSet<EntryHash> = fx
+        .full
+        .entry_hashes()
+        .into_iter()
+        .filter(|h| reach.is_ancestor(h, &fx.p_entry))
+        .collect();
+    CourierAnswer { proof, ancestors }
+}
+
+#[test]
+fn compaction_journals_the_discard_batch_and_proves_members() {
+    let fx = laggard_fixture();
+    let root = fx.leaf.discard_root().expect("compaction profile");
+    assert_ne!(root, Digest([0u8; 32]), "a discarding compaction pins a root");
+
+    // Exactly one batch, holding exactly the discarded set.
+    let batches: Vec<_> = fx.leaf.discard_batches().collect();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].seq, DiscardBatchSeq(0));
+    assert_eq!(batches[0].entries.len(), 2);
+    assert!(batches[0].entries.contains(&fx.p_entry));
+    assert_eq!(fx.leaf.oldest_discard_batch(), Some(DiscardBatchSeq(0)));
+    assert_eq!(fx.leaf.next_discard_batch(), DiscardBatchSeq(1));
+
+    // Membership proves against the chained root — and against nothing else.
+    let proof = fx.leaf.prove_discarded_at(&fx.p_entry, root).expect("provable");
+    assert!(proof.verifies(&fx.p_entry, &root));
+    assert!(
+        fx.leaf.prove_discarded_at(&fx.p_entry, Digest([9u8; 32])).is_none(),
+        "a root mismatch must refuse"
+    );
+    let retained = *fx.leaf.entry_hashes().iter().next().expect("residue retained");
+    assert!(
+        fx.leaf.prove_discarded_at(&retained, root).is_none(),
+        "a retained (never-discarded) member must refuse"
+    );
+}
+
+#[test]
+fn discard_journal_evicts_whole_batches_and_reanchors_the_chain() {
+    // Journal cap: 2 entries. Each cycle discards a 2-entry batch, so the second
+    // cycle evicts the first batch whole — its members become unprovable while the
+    // newest batch keeps verifying against the CURRENT chained root.
+    let mut a = Author::new(0x11);
+    let mut leaf = WindowedStore::<WinLang>::with_window_limits(64, 1, 2);
+
+    let mut batch_first_entry: Vec<EntryHash> = Vec::new();
+    for key in 0..3u16 {
+        let (add, add_id) = a.sign(TS_BASE + u64::from(key) * 10, vec![], WinOp::Add { key });
+        let (rem, _) = a.sign(TS_BASE + u64::from(key) * 10 + 1, vec![add_id], WinOp::Rem { key });
+        leaf.ingest_verified(verified(&add));
+        let add_entry = leaf.lifted_entry(OpId(add_id)).expect("lifted");
+        leaf.ingest_verified(verified(&rem));
+        let stats = leaf.compact();
+        assert_eq!(stats.discarded, 2, "each cycle discards its add+rem");
+        batch_first_entry.push(add_entry);
+    }
+
+    let root = leaf.discard_root().expect("compaction profile");
+    // Batches 0 and 1 aged out whole; batch 2 is retained and provable.
+    assert_eq!(leaf.oldest_discard_batch(), Some(DiscardBatchSeq(2)));
+    assert_eq!(leaf.next_discard_batch(), DiscardBatchSeq(3));
+    assert!(leaf.prove_discarded_at(&batch_first_entry[0], root).is_none());
+    assert!(leaf.prove_discarded_at(&batch_first_entry[1], root).is_none());
+    let proof = leaf
+        .prove_discarded_at(&batch_first_entry[2], root)
+        .expect("newest batch stays provable past older evictions");
+    assert!(proof.verifies(&batch_first_entry[2], &root), "chain re-anchors");
+}
+
+#[test]
+fn an_oversized_batch_clears_the_journal_but_later_batches_prove() {
+    // Cap 2, one compaction discarding 3 ops: the oversized batch is unprovable and
+    // clears everything older; the NEXT batch still proves against the current root.
+    let mut a = Author::new(0x22);
+    let mut leaf = WindowedStore::<WinLang>::with_window_limits(64, 1, 2);
+
+    let (add1, add1_id) = a.sign(TS_BASE, vec![], WinOp::Add { key: 0 });
+    let (add2, add2_id) = a.sign(TS_BASE + 1, vec![add1_id], WinOp::Add { key: 0 });
+    let (rem, _) = a.sign(TS_BASE + 2, vec![add2_id], WinOp::Rem { key: 0 });
+    for signed in [&add1, &add2, &rem] {
+        leaf.ingest_verified(verified(signed));
+    }
+    let add1_entry = leaf.lifted_entry(OpId(add1_id)).expect("lifted");
+    let stats = leaf.compact();
+    assert_eq!(stats.discarded, 3, "both adds + the remove discard");
+
+    let root = leaf.discard_root().expect("compaction profile");
+    assert!(
+        leaf.prove_discarded_at(&add1_entry, root).is_none(),
+        "an oversized batch is itself unprovable"
+    );
+    assert!(leaf.oldest_discard_batch().is_none(), "journal cleared");
+    assert_eq!(leaf.next_discard_batch(), DiscardBatchSeq(1), "seq still consumed");
+
+    // A later normal-sized batch re-anchors on the post-oversize chain value.
+    let (add3, add3_id) = a.sign(TS_BASE + 10, vec![], WinOp::Add { key: 1 });
+    let (rem3, _) = a.sign(TS_BASE + 11, vec![add3_id], WinOp::Rem { key: 1 });
+    leaf.ingest_verified(verified(&add3));
+    let add3_entry = leaf.lifted_entry(OpId(add3_id)).expect("lifted");
+    leaf.ingest_verified(verified(&rem3));
+    leaf.compact();
+    let root = leaf.discard_root().expect("compaction profile");
+    let proof = leaf
+        .prove_discarded_at(&add3_entry, root)
+        .expect("post-oversize batch provable");
+    assert!(proof.verifies(&add3_entry, &root));
+}
+
+#[test]
+fn a_deep_laggard_defers_and_a_real_courier_answer_admits_it() {
+    let mut fx = laggard_fixture();
+
+    // Deferral through the production ingest: no materialization, one DeferredLift.
+    let ingest = fx.leaf.ingest_verified(verified(&fx.x_signed));
+    assert!(ingest.lifted.is_empty(), "a deep laggard must not lift");
+    assert_eq!(ingest.courier.len(), 1, "one courier deferral");
+    let deferred = ingest.courier[0].clone();
+    assert_eq!(deferred.missing, BTreeSet::from([fx.p_entry]));
+    assert_eq!(fx.leaf.pending_len(), 1, "the op parks");
+    assert!(fx.leaf.lifted_entry(fx.x_id).is_none());
+
+    // The genuine answer: the leaf's own journal proof + full's real reach oracle.
+    let answer = genuine_answer(&fx);
+    assert!(
+        !answer.ancestors.is_empty(),
+        "the fixture's P has a retained ancestor (put), so the trusted half has teeth"
+    );
+    let context = fx.leaf.courier_context().expect("compaction profile");
+    let courier = MapCourier(HashMap::from([(fx.p_entry, answer)]));
+
+    let admitted = fx
+        .leaf
+        .lift_pending_via_courier(deferred.candidate, &context, &courier)
+        .expect("a genuine proof admits the deep laggard");
+    assert_eq!(admitted, vec![deferred.candidate]);
+    assert_eq!(fx.leaf.pending_len(), 0, "nothing stays parked");
+    assert_eq!(
+        fx.leaf.lifted_entry(fx.x_id),
+        fx.full.lifted_entry(fx.x_id),
+        "byte-compatible admission: both sides derive the same entry hash"
+    );
+    assert_eq!(fx.leaf.view(), fx.full.view(), "full-reference view equivalence");
+    assert_eq!(
+        win_state_root(&fx.leaf.view()),
+        win_state_root(&fx.full.view()),
+        "state_root equivalence"
+    );
+}
+
+#[test]
+fn a_forged_proof_or_stale_context_leaves_the_laggard_deferred() {
+    let mut fx = laggard_fixture();
+    let ingest = fx.leaf.ingest_verified(verified(&fx.x_signed));
+    let deferred = ingest.courier[0].clone();
+    let context = fx.leaf.courier_context().expect("compaction profile");
+    let before_view = fx.leaf.view();
+    let before_root = win_state_root(&before_view);
+
+    // Forged: the genuine proof with one bit of `pinned_before` flipped.
+    let mut forged = genuine_answer(&fx);
+    forged.proof.pinned_before.0[0] ^= 1;
+    let courier = MapCourier(HashMap::from([(fx.p_entry, forged)]));
+    let result = fx
+        .leaf
+        .lift_pending_via_courier(deferred.candidate, &context, &courier);
+    assert!(
+        matches!(
+            result,
+            Err(DeferredLiftError::Courier(CourierFault::BadProof(h))) if h == fx.p_entry
+        ),
+        "a bit-flipped proof must be BadProof, got {result:?}"
+    );
+    assert_eq!(fx.leaf.pending_len(), 1, "the op stays parked");
+    assert!(fx.leaf.lifted_entry(fx.x_id).is_none(), "nothing admitted");
+    assert_eq!(fx.leaf.view(), before_view, "view unchanged");
+    assert_eq!(win_state_root(&fx.leaf.view()), before_root);
+
+    // Unanswered: a courier with nothing for this prev.
+    let empty = MapCourier(HashMap::new());
+    let result = fx
+        .leaf
+        .lift_pending_via_courier(deferred.candidate, &context, &empty);
+    assert!(matches!(
+        result,
+        Err(DeferredLiftError::Courier(CourierFault::Unanswered(h))) if h == fx.p_entry
+    ));
+    assert_eq!(fx.leaf.pending_len(), 1);
+
+    // Stale context: the store moved on (a new op changed the retained set).
+    let mut c = Author::new(0xC3);
+    let (fresh, _) = c.sign(TS_BASE + 50, vec![], WinOp::Add { key: 3 });
+    fx.leaf.ingest_verified(verified(&fresh));
+    let genuine = MapCourier(HashMap::from([(fx.p_entry, genuine_answer(&fx))]));
+    let result = fx
+        .leaf
+        .lift_pending_via_courier(deferred.candidate, &context, &genuine);
+    assert!(
+        matches!(result, Err(DeferredLiftError::StaleContext)),
+        "an out-of-date context must be rejected before the floor, got {result:?}"
+    );
+    assert_eq!(fx.leaf.pending_len(), 1, "still parked; re-request under fresh context");
+
+    // And under the CURRENT context the same genuine answer admits.
+    let fresh_context = fx.leaf.courier_context().expect("compaction profile");
+    fx.leaf
+        .lift_pending_via_courier(deferred.candidate, &fresh_context, &genuine)
+        .expect("genuine answer admits under the fresh context");
+    assert_eq!(fx.leaf.pending_len(), 0);
 }

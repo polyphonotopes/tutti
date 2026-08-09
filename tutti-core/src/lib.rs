@@ -44,14 +44,24 @@ pub use ops::{
 };
 pub use retain::causal_maxima;
 pub use store::{DecodedOp, FoldCtx, Store, sync_root_of};
-pub use windowed::{Compaction, WindowedStore};
+pub use windowed::{
+    Compaction, CourierContext, DEFAULT_DISCARD_HISTORY_CAP, DeferredLift, DeferredLiftError,
+    DiscardBatchRef, DiscardBatchSeq, WindowIngest, WindowedStore,
+};
 
 /// The ancestry seam and the bounded-window floor pieces, re-exported from `hhhs-dag`
 /// so every `tutti_core::…` spelling keeps compiling after they sank to the floor:
 /// the [`Reach`] contract + the lazy [`LazyReach`] oracle, and the L-free
 /// [`WindowedDag`]/[`WindowedReach`] the leaf-profile [`WindowedStore`] drives.
 pub use hhhs_dag::reach::{LazyReach, Reach};
-pub use hhhs_dag::windowed::{WindowedDag, WindowedReach};
+pub use hhhs_dag::windowed::{
+    Courier, CourierAnswer, CourierFault, DiscardProof, LiftOutcome, WindowedDag, WindowedReach,
+};
+
+/// The floor's 32-byte digest, re-exported because it is the type of the pinned
+/// discard root ([`WindowedStore::discard_root`]) and of every [`DiscardProof`]
+/// component a courier serializes.
+pub use hhhs_dag::Digest;
 
 /// The kernel's opaque-payload entry identity, re-exported so a downstream domain
 /// names it through `tutti_core` and never takes a direct, rev-pinned `hhhs-dag`

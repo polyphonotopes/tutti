@@ -460,6 +460,15 @@ impl<L: OpLanguage> Store<L> {
         L::fold(&FoldCtx::new(self))
     }
 
+    /// A causal-ancestry oracle over this store's full DAG — the cheap lazy
+    /// [`LazyReach`] backend (`O(N + E)` adjacency snapshot, reverse-walk
+    /// `is_ancestor`). Production surface: a courier responder answers a windowed
+    /// leaf's ancestor-mask question with exactly this oracle (§4.5), so it is not
+    /// gated behind `test-support` like [`Store::dag`].
+    pub fn reach(&self) -> LazyReach {
+        LazyReach::new(&self.dag)
+    }
+
     /// The reference projection: the identical [`OpLanguage::fold`], but driven by
     /// the kernel `ReachIndex` and `hhhs::register::resolve` instead of the cheap
     /// [`LazyReach`]. Provided (feature `test-support`) as the oracle a downstream

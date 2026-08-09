@@ -44,10 +44,12 @@
 //! of total history N**, so the store's *memory* is bounded to the leaf budget (§5),
 //! not just its fold input.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use hhhs_dag::windowed::{PackedSummary, WindowedDag, WindowedReach};
-use hhhs_dag::{DagRead, Entry, EntryHash, GrowthEpoch, Position};
+use hhhs_dag::windowed::{
+    Courier, CourierFault, DiscardProof, LiftOutcome, PackedSummary, WindowedDag, WindowedReach,
+};
+use hhhs_dag::{DagRead, Digest, Entry, EntryHash, GrowthEpoch, Position};
 
 #[cfg(any(test, feature = "test-support"))]
 use hhhs::cover::ReachIndex;
@@ -58,6 +60,137 @@ use crate::store::{DecodedOp, FoldCtx, frame_signed, sync_root_of, unframe_signe
 // ===========================================================================
 // §2.2 — the checkpoint: compacted state + packed ancestry summary.
 // ===========================================================================
+
+/// The [`Default`] cap on retained discard-journal **entries** (not batches) — twice
+/// [`PackedSummary::DEFAULT_DISCARD_CAP`], so the journal outlives the reach cache: an
+/// op whose cached reach row was just evicted is still provable for a while before its
+/// whole batch ages out of the journal too.
+pub const DEFAULT_DISCARD_HISTORY_CAP: usize = PackedSummary::DEFAULT_DISCARD_CAP * 2;
+
+/// Monotone sequence number of one discard batch — the `n`-th non-empty batch this
+/// store's compactions ever folded into its pinned discard root (0-based).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DiscardBatchSeq(pub u64);
+
+/// One retained discard batch, owned by the journal.
+#[derive(Clone, Debug)]
+struct StoredDiscardBatch {
+    seq: DiscardBatchSeq,
+    /// Canonical ascending [`EntryHash`] order; semantically a set.
+    entries: Box<[EntryHash]>,
+}
+
+/// A borrowed view of one retained discard batch
+/// ([`WindowedStore::discard_batches`]) — what a fuller peer copies to track this
+/// store's discard chain and answer its couriers.
+#[derive(Clone, Copy, Debug)]
+pub struct DiscardBatchRef<'a> {
+    pub seq: DiscardBatchSeq,
+    /// Ascending [`EntryHash`] order; semantically a set.
+    pub entries: &'a [EntryHash],
+}
+
+/// The **bounded discard journal** (M3.2 courier responder floor): the most recent
+/// discard batches, verbatim, so this store — or a peer that copied them — can
+/// construct a [`DiscardProof`] for any member of a retained batch against the
+/// store's own chained [`PackedSummary::discard_root`].
+///
+/// `PackedSummary::rebuild` commits each non-empty batch into the 32-byte pinned
+/// root and then forgets the batch itself; this journal records the identical
+/// `discard` set [`WindowedStore::compact`] computes, capped by **entry** count.
+/// Eviction is by whole batch (front/oldest first): retaining only part of a batch
+/// cannot reconstruct its Merkle path. `pinned_before_front` re-anchors the chain as
+/// batches age out, so proofs for every retained batch keep verifying against the
+/// current root. Past eviction, [`WindowedStore::prove_discarded_at`] returns `None`
+/// and the deep laggard stays safely deferred — memory stays `O(entry_cap)`,
+/// independent of total history.
+struct DiscardHistory {
+    /// The pinned discard root's value immediately before `batches.front()` was
+    /// folded in (all-zero while nothing has been evicted).
+    pinned_before_front: Digest,
+    /// Retained batches, oldest first.
+    batches: VecDeque<StoredDiscardBatch>,
+    /// Total entries across `batches`.
+    stored_entries: usize,
+    /// Cap on `stored_entries`; enforced by whole-batch eviction.
+    entry_cap: usize,
+    /// Sequence number the next recorded batch gets.
+    next_seq: u64,
+}
+
+impl DiscardHistory {
+    fn new(entry_cap: usize) -> Self {
+        Self {
+            pinned_before_front: Digest([0u8; 32]),
+            batches: VecDeque::new(),
+            stored_entries: 0,
+            entry_cap,
+            next_seq: 0,
+        }
+    }
+
+    /// Record one non-empty discard batch. `pinned_before` is the pinned discard
+    /// root's value just before this batch was folded in (i.e. before the
+    /// [`PackedSummary::rebuild`] that committed it).
+    ///
+    /// An oversized batch (`entries.len() > entry_cap`) is itself unprovable, and it
+    /// forces every older batch out too: a proof for an older batch must name this
+    /// batch's root among its `later_batches`, which requires holding the batch.
+    fn record(&mut self, entries: Box<[EntryHash]>, pinned_before: Digest) {
+        debug_assert!(!entries.is_empty(), "empty batches are never pinned");
+        debug_assert!(entries.is_sorted(), "batch entries must be canonically sorted");
+        let seq = DiscardBatchSeq(self.next_seq);
+        self.next_seq += 1;
+        if entries.len() > self.entry_cap {
+            let root = Self::root_of(&entries);
+            self.batches.clear();
+            self.stored_entries = 0;
+            // With no retained batches the front anchor IS the current root.
+            self.pinned_before_front = DiscardProof::fold_pinned(&pinned_before, &root);
+            return;
+        }
+        self.stored_entries += entries.len();
+        self.batches.push_back(StoredDiscardBatch { seq, entries });
+        while self.stored_entries > self.entry_cap {
+            let popped = self
+                .batches
+                .pop_front()
+                .expect("over-cap journal has an oldest batch");
+            self.stored_entries -= popped.entries.len();
+            self.pinned_before_front = DiscardProof::fold_pinned(
+                &self.pinned_before_front,
+                &Self::root_of(&popped.entries),
+            );
+        }
+    }
+
+    /// The canonical Merkle root of one stored batch.
+    fn root_of(entries: &[EntryHash]) -> Digest {
+        DiscardProof::batch_root(&entries.iter().copied().collect())
+    }
+
+    /// A membership proof for `member` against the chain this journal has retained,
+    /// or `None` if `member`'s batch has been evicted (or was never discarded).
+    fn prove(&self, member: &EntryHash) -> Option<DiscardProof> {
+        let idx = self
+            .batches
+            .iter()
+            .position(|batch| batch.entries.binary_search(member).is_ok())?;
+        let mut pinned_before = self.pinned_before_front;
+        for earlier in self.batches.iter().take(idx) {
+            pinned_before =
+                DiscardProof::fold_pinned(&pinned_before, &Self::root_of(&earlier.entries));
+        }
+        let later: Vec<Digest> = self
+            .batches
+            .iter()
+            .skip(idx + 1)
+            .map(|batch| Self::root_of(&batch.entries))
+            .collect();
+        let batch: BTreeSet<EntryHash> = self.batches[idx].entries.iter().copied().collect();
+        DiscardProof::for_member(&batch, member, pinned_before, later)
+    }
+}
 
 /// The **checkpoint** a compacted [`WindowedStore`] carries across the cut
 /// (`docs/vision/windowed-store-design.md` §2.2). Present iff the store was built for
@@ -74,6 +207,9 @@ struct Checkpoint {
     /// **The packed ancestry summary** (§3.2/§3.3/§3.4) — the M3.2 bounded replacement
     /// for M3.1's Θ(N²) `anc`. See [`PackedSummary`].
     summary: PackedSummary,
+    /// The bounded discard journal backing [`WindowedStore::prove_discarded_at`] and
+    /// [`WindowedStore::discard_batches`] — the courier responder's proof floor.
+    discard_history: DiscardHistory,
     /// §4.3 **pinned cut `ops_root`**: the Merkle commitment over full history at the
     /// first compaction (computed while the leaf still held everything). The
     /// verifiability anchor a self-compacted leaf checks discarded-op proofs against
@@ -88,9 +224,10 @@ struct Checkpoint {
 }
 
 impl Checkpoint {
-    fn new() -> Self {
+    fn with_limits(discard_reach_cap: usize, discard_history_entry_cap: usize) -> Self {
         Self {
-            summary: PackedSummary::default(),
+            summary: PackedSummary::with_discard_cap(discard_reach_cap),
+            discard_history: DiscardHistory::new(discard_history_entry_cap),
             #[cfg(feature = "merkle")]
             pinned_cut_ops_root: None,
             total_discarded: 0,
@@ -108,6 +245,86 @@ pub struct Compaction {
     /// Ops the fold still iterates afterward (residue ∪ window).
     pub retained: usize,
 }
+
+// ===========================================================================
+// §4.5 — deep-laggard deferral surfaced to the sync layer.
+// ===========================================================================
+
+/// One verified op the store could NOT admit locally: a `prev` was discarded and its
+/// cached reach row has been evicted, so an exact ancestor row cannot be built
+/// without courier help (§4.5). The op stays parked in `pending` — deferred, never
+/// wrong — until [`WindowedStore::lift_pending_via_courier`] admits it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeferredLift {
+    /// The locally re-derived entry hash the op would lift under — stable, because
+    /// strict deferral fixes the op's resolved `prevs` (`source_to_entry` keeps
+    /// discarded bindings).
+    pub candidate: EntryHash,
+    /// The evicted-predecessor rows a courier must answer for.
+    pub missing: BTreeSet<EntryHash>,
+}
+
+/// What one [`WindowedStore::ingest_verified`] call did: the entries it lifted, plus
+/// the ops it had to park for courier admission.
+#[derive(Clone, Debug, Default)]
+pub struct WindowIngest {
+    /// Entries newly lifted (materialized and indexed), in lift order.
+    pub lifted: Vec<EntryHash>,
+    /// Ops deferred pending a courier round trip (§4.5), deduplicated by candidate.
+    pub courier: Vec<DeferredLift>,
+}
+
+/// The outcome of one internal lift attempt.
+enum TryLift {
+    /// Appended under this entry hash.
+    Lifted(EntryHash),
+    /// Ordinary missing `OpId` reference; wait for RBSR closure (strict deferral).
+    MissingSources,
+    /// Every source resolves but a discarded prev's reach is gone — courier needed.
+    Courier(DeferredLift),
+}
+
+/// The horizon a courier request is answered against: the requester's pinned discard
+/// root plus its current retained identity set. The responder's ancestor mask
+/// indexes `retained` positionally, so admission requires the store's context to
+/// still equal the one the request was built from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CourierContext {
+    /// [`PackedSummary::discard_root`] at request time.
+    pub discard_root: Digest,
+    /// The sorted current retained entry-hash universe; a response mask indexes this
+    /// exact array.
+    pub retained: Box<[EntryHash]>,
+}
+
+/// Why [`WindowedStore::lift_pending_via_courier`] declined to admit. The store is
+/// unchanged in every case — the op stays parked (§4.5 defer-never-reject).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeferredLiftError {
+    /// The store's current [`WindowedStore::courier_context`] no longer equals the
+    /// context the answer was produced against (a compaction or lift intervened, or
+    /// this is not a compacting store). Re-request under the fresh context.
+    StaleContext,
+    /// No parked op currently derives this candidate hash with fully resolved
+    /// sources.
+    UnknownCandidate(EntryHash),
+    /// The floor rejected the courier's answer ([`CourierFault`]); nothing admitted.
+    Courier(CourierFault),
+}
+
+impl core::fmt::Display for DeferredLiftError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::StaleContext => write!(f, "courier context is stale; re-request"),
+            Self::UnknownCandidate(hash) => {
+                write!(f, "no parked op derives candidate {:?}", hash)
+            }
+            Self::Courier(fault) => write!(f, "courier admission failed: {fault:?}"),
+        }
+    }
+}
+
+impl std::error::Error for DeferredLiftError {}
 
 // ===========================================================================
 // §6.1 — `WindowedStore<L>`: the leaf-profile domain sibling of `Store<L>`.
@@ -191,6 +408,24 @@ impl<L: OpLanguage> WindowedStore<L> {
     /// retained is `residue + window`, not capped at `W` — the residue is whatever the
     /// domain's [`OpLanguage::retain`] keeps (§2.5). Folds correctly for `N > W`.
     pub fn with_window(window_cap: usize) -> Self {
+        Self::with_window_limits(
+            window_cap,
+            PackedSummary::DEFAULT_DISCARD_CAP,
+            DEFAULT_DISCARD_HISTORY_CAP,
+        )
+    }
+
+    /// [`WindowedStore::with_window`] with explicit M3.2 residual bounds:
+    /// `discard_reach_cap` caps the cached discarded-op reach rows (ordinary
+    /// stragglers admit locally while their prev's row is cached; past it they defer
+    /// to the courier, §4.5), and `discard_history_entry_cap` caps the discard
+    /// journal backing [`WindowedStore::prove_discarded_at`] (past it a member's
+    /// proof is `None` and its laggard stays safely deferred).
+    pub fn with_window_limits(
+        window_cap: usize,
+        discard_reach_cap: usize,
+        discard_history_entry_cap: usize,
+    ) -> Self {
         assert!(window_cap >= 1, "windowed store window budget must be >= 1");
         Self {
             // The DAG never hard-evicts in this profile (the store bounds memory via
@@ -202,7 +437,10 @@ impl<L: OpLanguage> WindowedStore<L> {
             decoded: BTreeMap::new(),
             heads: BTreeMap::new(),
             pending: Vec::new(),
-            checkpoint: Some(Checkpoint::new()),
+            checkpoint: Some(Checkpoint::with_limits(
+                discard_reach_cap,
+                discard_history_entry_cap,
+            )),
             window_cap,
         }
     }
@@ -324,26 +562,29 @@ impl<L: OpLanguage> WindowedStore<L> {
     /// [`Store::ingest_verified`](crate::Store::ingest_verified); the only difference
     /// is the bounded backing DAG.
     ///
-    /// Returns the entries this call newly lifted. An empty return means the op parked
-    /// (or is a duplicate). A parked op is not in [`WindowedStore::entry_hashes`].
-    pub fn ingest_verified(&mut self, op: VerifiedOpG<L>) -> Vec<EntryHash> {
+    /// Returns what this call did: [`WindowIngest::lifted`] names the entries newly
+    /// lifted (empty means the op parked or is a duplicate — a parked op is not in
+    /// [`WindowedStore::entry_hashes`]), and [`WindowIngest::courier`] names any op
+    /// deferred for courier admission (§4.5: a referenced prev was discarded and its
+    /// cached reach row is gone, so the op parks rather than admit a wrong row).
+    pub fn ingest_verified(&mut self, op: VerifiedOpG<L>) -> WindowIngest {
         let id = op.id();
         if self.source_to_entry.contains_key(&id) {
-            return Vec::new();
+            return WindowIngest::default();
         }
         if self.pending.iter().any(|p| p.id() == id) {
-            return Vec::new();
+            return WindowIngest::default();
         }
         self.advance_head(&op);
         self.pending.push(op);
-        let lifted = self.drain_pending();
+        let ingest = self.drain_pending();
         // M3.1: keep steady-state memory ≈ residue + W by compacting once the retained
         // set outgrows the window budget. Explicit `compact()` (adversarial cuts) is
         // layered on top; both call the same sound retention path.
         if self.checkpoint.is_some() && self.decoded.len() > self.window_cap {
             self.compact();
         }
-        lifted
+        ingest
     }
 
     /// Advance (never regress) the author's tracked head to the greatest seq seen.
@@ -371,8 +612,10 @@ impl<L: OpLanguage> WindowedStore<L> {
         Some(prevs)
     }
 
-    /// Try to lift one op. Returns its entry hash iff appended; `None` (no mutation) if
-    /// its causal past is incomplete.
+    /// Try to lift one op. [`TryLift::Lifted`] iff appended; otherwise no mutation:
+    /// [`TryLift::MissingSources`] when its causal past is incomplete (ordinary
+    /// strict deferral), [`TryLift::Courier`] when every source resolves but a
+    /// discarded prev's reach row is gone (§4.5 deep laggard — park for the courier).
     ///
     /// **M3.0** (no compaction): `append_capped` with hard eviction past `W`; evicted
     /// entries are pruned from every map in lockstep with the [`WindowedDag`].
@@ -382,25 +625,38 @@ impl<L: OpLanguage> WindowedStore<L> {
     /// retained-ancestor [`BitRow`], `reach(entry) = ⋃_{p ∈ prevs}({index(p)} ∪
     /// reach(p))` (§3.2/§3.3). Because the store lifts an op only once every prev is
     /// present (strict deferral) and every prev's row is already built, the new row is
-    /// exact (§3.2 boundary lemma; the standard memoized-topo closure, in bits).
+    /// exact (§3.2 boundary lemma; the standard memoized-topo closure, in bits). A
+    /// [`LiftOutcome::Deferred`] answer leaves the summary — and the store — entirely
+    /// unmutated: no DAG, source-map, or decoded insertion happens for a deferred op.
     /// Eviction is deferred to [`WindowedStore::compact`].
-    fn try_lift(&mut self, op: &VerifiedOpG<L>) -> Option<EntryHash> {
-        let prevs = self.resolve_prevs(op)?;
+    fn try_lift(&mut self, op: &VerifiedOpG<L>) -> TryLift {
+        let Some(prevs) = self.resolve_prevs(op) else {
+            return TryLift::MissingSources;
+        };
         let entry = Entry::new(frame_signed::<L>(&op.signed()), Position(prevs.clone()));
         let entry_hash = entry.hash();
         let id = op.id();
 
         if let Some(cp) = self.checkpoint.as_mut() {
-            // M3.2 compaction profile: non-evicting insert + packed-summary extension.
+            // M3.2 compaction profile: packed-summary extension first — only a
+            // Lifted verdict may materialize anything.
+            match cp.summary.lift(entry_hash, &prevs) {
+                LiftOutcome::Lifted => {}
+                LiftOutcome::Deferred { missing } => {
+                    return TryLift::Courier(DeferredLift {
+                        candidate: entry_hash,
+                        missing,
+                    });
+                }
+            }
             self.dag.insert(&entry);
-            cp.summary.lift(entry_hash, &prevs);
             self.source_to_entry.insert(id, entry_hash);
             self.entry_to_source.insert(entry_hash, id);
             self.decoded.insert(
                 entry_hash,
                 DecodedOp::new(op.author(), op.payload().clone(), op.timestamp_ms(), op.seq_num()),
             );
-            return Some(entry_hash);
+            return TryLift::Lifted(entry_hash);
         }
 
         // M3.0 profile: unchanged bounded-window hard eviction.
@@ -417,22 +673,29 @@ impl<L: OpLanguage> WindowedStore<L> {
             }
             self.decoded.remove(&gone);
         }
-        Some(entry_hash)
+        TryLift::Lifted(entry_hash)
     }
 
     /// Repeatedly attempt to lift parked ops until a full pass makes no progress.
-    fn drain_pending(&mut self) -> Vec<EntryHash> {
+    /// Courier-deferred ops stay parked and are reported once per candidate.
+    fn drain_pending(&mut self) -> WindowIngest {
         let mut lifted = Vec::new();
+        let mut courier: BTreeMap<EntryHash, DeferredLift> = BTreeMap::new();
         loop {
             let parked = std::mem::take(&mut self.pending);
             let mut still_pending = Vec::with_capacity(parked.len());
             let mut progressed = false;
             for op in parked {
-                if let Some(hash) = self.try_lift(&op) {
-                    lifted.push(hash);
-                    progressed = true;
-                } else {
-                    still_pending.push(op);
+                match self.try_lift(&op) {
+                    TryLift::Lifted(hash) => {
+                        lifted.push(hash);
+                        progressed = true;
+                    }
+                    TryLift::MissingSources => still_pending.push(op),
+                    TryLift::Courier(deferred) => {
+                        courier.insert(deferred.candidate, deferred);
+                        still_pending.push(op);
+                    }
                 }
             }
             self.pending = still_pending;
@@ -440,7 +703,14 @@ impl<L: OpLanguage> WindowedStore<L> {
                 break;
             }
         }
-        lifted
+        // Defensive: a candidate that ultimately lifted is not a courier case.
+        for hash in &lifted {
+            courier.remove(hash);
+        }
+        WindowIngest {
+            lifted,
+            courier: courier.into_values().collect(),
+        }
     }
 
     /// **M3.2 — compact at the current frontier** (`windowed-store-design.md`
@@ -497,11 +767,21 @@ impl<L: OpLanguage> WindowedStore<L> {
         // (keeping it `O(|R|²)`-wide, independent of N — the M3.2 bound) while staying
         // exact for every retained pair. Discarded ops keep a bounded residue-ancestor
         // row in `discarded_reach` so a later laggard referencing one still folds
-        // correctly with no courier (§4.5 residual — the O(N) part M3.2 does not yet
-        // bound; deep-laggard courier admission would eliminate it).
+        // correctly with no courier; past that cap the laggard defers and is admitted
+        // through `lift_pending_via_courier` (§4.5). The identical discard set is
+        // journaled (bounded) so this store — or a peer copying the journal — can
+        // prove membership of a discarded op against the pinned root the rebuild
+        // chains; `pinned_before` is captured BEFORE the rebuild folds the batch in.
         {
             let cp = self.checkpoint.as_mut().expect("compaction profile");
+            let pinned_before = cp.summary.discard_root();
             cp.summary.rebuild(&keep);
+            if !discard.is_empty() {
+                cp.discard_history.record(
+                    discard.iter().copied().collect::<Vec<_>>().into_boxed_slice(),
+                    pinned_before,
+                );
+            }
             cp.total_discarded += discard.len();
             cp.compactions += 1;
         }
@@ -534,6 +814,163 @@ impl<L: OpLanguage> WindowedStore<L> {
     /// Number of compaction events run so far (auto + explicit) — diagnostics.
     pub fn compaction_count(&self) -> usize {
         self.checkpoint.as_ref().map_or(0, |cp| cp.compactions)
+    }
+
+    // -----------------------------------------------------------------------
+    // §4.5 — the discard journal (courier responder floor) and courier admission.
+    // -----------------------------------------------------------------------
+
+    /// This store's pinned discard root — the chained
+    /// [`PackedSummary::discard_root`] every [`DiscardProof`] must verify against
+    /// (all-zero until the first discarding compaction). `None` on the M3.0 profile.
+    pub fn discard_root(&self) -> Option<Digest> {
+        self.checkpoint.as_ref().map(|cp| cp.summary.discard_root())
+    }
+
+    /// The retained discard batches, oldest first — the journal a fuller peer copies
+    /// (per batch, in order) to track this store's discard chain and later answer
+    /// its courier requests. Bounded: whole batches age out oldest-first past the
+    /// journal's entry cap. Empty on the M3.0 profile.
+    pub fn discard_batches(&self) -> impl DoubleEndedIterator<Item = DiscardBatchRef<'_>> + '_ {
+        self.checkpoint.iter().flat_map(|cp| {
+            cp.discard_history.batches.iter().map(|batch| DiscardBatchRef {
+                seq: batch.seq,
+                entries: &batch.entries,
+            })
+        })
+    }
+
+    /// The oldest retained batch's sequence number, or `None` if the journal is
+    /// empty (nothing discarded yet, or everything retained has aged out).
+    pub fn oldest_discard_batch(&self) -> Option<DiscardBatchSeq> {
+        self.checkpoint
+            .as_ref()
+            .and_then(|cp| cp.discard_history.batches.front())
+            .map(|batch| batch.seq)
+    }
+
+    /// The sequence number the next non-empty discard batch will get.
+    pub fn next_discard_batch(&self) -> DiscardBatchSeq {
+        DiscardBatchSeq(
+            self.checkpoint
+                .as_ref()
+                .map_or(0, |cp| cp.discard_history.next_seq),
+        )
+    }
+
+    /// A membership proof that `member` is committed in this store's own discard
+    /// chain, against `expected_root` — the self-serve form of the courier
+    /// responder. `None` for a root mismatch (`expected_root` is not the current
+    /// [`WindowedStore::discard_root`]), for a member whose batch has been evicted
+    /// from the bounded journal, or for a member this store never discarded — the
+    /// asking laggard then simply stays deferred (§4.5 defer-never-reject).
+    pub fn prove_discarded_at(
+        &self,
+        member: &EntryHash,
+        expected_root: Digest,
+    ) -> Option<DiscardProof> {
+        let cp = self.checkpoint.as_ref()?;
+        if expected_root != cp.summary.discard_root() {
+            return None;
+        }
+        cp.discard_history.prove(member)
+    }
+
+    /// Retry every parked op: anything unblocked since the last attempt lifts (and
+    /// is reported in [`WindowIngest::lifted`]), and whatever still needs courier
+    /// help is enumerated in [`WindowIngest::courier`] — the poll a sync driver runs
+    /// between courier round trips (§4.5). A no-op returning empty vectors when
+    /// nothing is parked.
+    pub fn retry_pending(&mut self) -> WindowIngest {
+        self.drain_pending()
+    }
+
+    /// The horizon a courier request must be answered against: the current pinned
+    /// discard root plus the sorted retained identity set (the array a response's
+    /// ancestor mask indexes). `None` on the M3.0 profile — a non-compacting store
+    /// never courier-defers.
+    pub fn courier_context(&self) -> Option<CourierContext> {
+        let cp = self.checkpoint.as_ref()?;
+        Some(CourierContext {
+            discard_root: cp.summary.discard_root(),
+            retained: self
+                .entry_to_source
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        })
+    }
+
+    /// Admit a courier-deferred op ([`DeferredLift`]) with a courier's answers
+    /// (§4.5). `expected_context` is the context the answers were produced against;
+    /// it must still equal the store's current [`WindowedStore::courier_context`] —
+    /// a stale context is rejected BEFORE the floor is consulted, since its mask
+    /// indexes a retained array that no longer exists.
+    ///
+    /// On success the op is materialized exactly as a local lift would have
+    /// materialized it, removed from `pending`, and every op it unblocks is drained;
+    /// the returned entries are `candidate` first, then the drained lifts. On any
+    /// error **nothing is mutated** and the op stays parked — deferred, never
+    /// rejected, never wrong ([`PackedSummary::lift_via_courier`] verifies the proof
+    /// half against the pinned root and admits only then).
+    pub fn lift_pending_via_courier(
+        &mut self,
+        candidate: EntryHash,
+        expected_context: &CourierContext,
+        courier: &dyn Courier,
+    ) -> Result<Vec<EntryHash>, DeferredLiftError> {
+        let current = self
+            .courier_context()
+            .ok_or(DeferredLiftError::StaleContext)?;
+        if current != *expected_context {
+            return Err(DeferredLiftError::StaleContext);
+        }
+
+        // Re-derive the parked op this candidate names. Strict deferral makes the
+        // derivation stable: resolved prevs come from `source_to_entry`, which keeps
+        // discarded bindings.
+        let mut found: Option<(usize, BTreeSet<EntryHash>, Entry)> = None;
+        for (i, op) in self.pending.iter().enumerate() {
+            let Some(prevs) = self.resolve_prevs(op) else {
+                continue;
+            };
+            let entry = Entry::new(frame_signed::<L>(&op.signed()), Position(prevs.clone()));
+            if entry.hash() == candidate {
+                found = Some((i, prevs, entry));
+                break;
+            }
+        }
+        let (idx, prevs, entry) =
+            found.ok_or(DeferredLiftError::UnknownCandidate(candidate))?;
+
+        {
+            let cp = self
+                .checkpoint
+                .as_mut()
+                .expect("courier_context() answered, so this is a compacting store");
+            cp.summary
+                .lift_via_courier(candidate, &prevs, courier)
+                .map_err(DeferredLiftError::Courier)?;
+        }
+
+        // Admitted by the floor: materialize exactly as a local lift would.
+        let op = self.pending.remove(idx);
+        self.dag.insert(&entry);
+        self.source_to_entry.insert(op.id(), candidate);
+        self.entry_to_source.insert(candidate, op.id());
+        self.decoded.insert(
+            candidate,
+            DecodedOp::new(op.author(), op.payload().clone(), op.timestamp_ms(), op.seq_num()),
+        );
+
+        let mut lifted = vec![candidate];
+        lifted.extend(self.drain_pending().lifted);
+        // The same steady-state memory rule `ingest_verified` applies.
+        if self.decoded.len() > self.window_cap {
+            self.compact();
+        }
+        Ok(lifted)
     }
 
     /// The pinned cut `ops_root` (§4.3), if this store has compacted at least once

@@ -13,6 +13,12 @@
 /// ALPN for the music lane's range-based set reconciliation.
 pub const MUSIC_RBSR_ALPN: &[u8] = b"tutti/music/rbsr/3";
 
+/// ALPN for the music lane's deep-laggard courier proof exchange (M3.2 §4.5): one
+/// `CourierRequest`/`CourierResponse` per stream, answering a windowed leaf's
+/// evicted-predecessor question with a `DiscardProof` + ancestor mask. Generation 1
+/// — independent of the RBSR generation, which never carries courier frames.
+pub const MUSIC_COURIER_ALPN: &[u8] = b"tutti/music/courier/1";
+
 /// RBSR strategy name for the music lane.
 pub const MUSIC_STRATEGY_NAME: &str = "tutti-music-entryhash";
 
