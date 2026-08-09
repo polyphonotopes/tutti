@@ -33,12 +33,14 @@
 pub mod facets;
 pub mod fold;
 pub mod lang;
+pub mod net;
 pub mod ops;
 pub mod render;
 pub mod tuning;
 
 pub use facets::{Envelope, Interp};
 pub use lang::{MusicLang, MusicView};
+pub use net::{LANE_STRATEGY_VERSION, MUSIC_RBSR_ALPN, MUSIC_STRATEGY_NAME};
 pub use ops::MusicOp;
 pub use tuning::{TunedDegree, TunedPeriodicPitch, Tuning, TuningDefinition, TuningId};
 
