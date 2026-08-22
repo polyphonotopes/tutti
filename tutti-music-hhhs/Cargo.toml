@@ -8,11 +8,11 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 tutti-music = { path = "../tutti-music" }
-hhhs = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }
-hhhs-cap = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }
-hhhs-proof = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }
-hhhs-replica = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }
-hhhs-store = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }
+hhhs = { version = "0.4.1", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.1" }
+hhhs-cap = { version = "0.4.1", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.1" }
+hhhs-proof = { version = "0.4.1", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.1" }
+hhhs-replica = { version = "0.4.1", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.1" }
+hhhs-store = { version = "0.4.1", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.1" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
