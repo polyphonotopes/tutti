@@ -5,8 +5,8 @@ edition = "2021"
 description = "Stage 1 of the tutti/AMY ESP32 grand challenge: drive the AMY C synthesizer from Rust on the desktop, and project a tutti pitch-set into AMY wire events."
 publish = false
 
-# Deliberately NOT a walkie workspace member — excluded in the root Cargo.toml,
-# like `relay/`, so walkie's normal build/CI never pulls the C toolchain.
+# Deliberately not a default workspace member: the AMY leaf links a C synth and
+# is verified independently so ordinary Tutti consumers do not need a C toolchain.
 
 [lib]
 name = "tutti_amy"
@@ -17,14 +17,16 @@ name = "render-proof"
 path = "src/main.rs"
 
 [dependencies]
-# The REAL tutti substrate: a generic reconciling signed-op store over an hhhs
-# causal op-DAG. `test-support` exposes `Store::view_reference` (drive the SAME
-# fold on the kernel ReachIndex) so convergence can be checked against the oracle.
-# NOT enabling `merkle`, matching the leaf profile (drops radix_immutable).
-tutti-core = { path = "../tutti-core", features = ["test-support"] }
-# The music protocol: MusicOp/MusicLang, tuning identity, the facet types, and
-# the render seam this crate compiles to AMY wire strings.
-tutti-music = { path = "../tutti-music", features = ["legacy-source-log"] }
+futures = "0.3"
+hhhs = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }
+hhhs-proof = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }
+hhhs-replica = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }
+hhhs-store = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }
+hhhs-sync = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }
+# The render protocol and its capability-native HHHS Replica seam. AMY owns no
+# alternate source log, materializer, or network runtime.
+tutti-music = { path = "../tutti-music" }
+tutti-music-hhhs = { path = "../tutti-music-hhhs" }
 serde = { version = "1.0", features = ["derive"] }
 
 [build-dependencies]

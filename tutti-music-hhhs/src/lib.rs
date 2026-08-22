@@ -541,6 +541,26 @@ pub fn delegation_payload(
     }))
 }
 
+/// Delegate music invocation to one receiver through the same typed Replica
+/// admission path used for commands. The returned entry hash is the grant the
+/// receiver presents when authoring subsequent music commands.
+pub fn delegate<S: ReplicaStorage + 'static>(
+    replica: &MusicReplica<S>,
+    namespace: Digest,
+    parent: EntryHash,
+    issuer_key: &SigningKey,
+    receiver: ActorId,
+) -> Result<AdmissionOutcome, ReplicaError> {
+    let issuer = ActorId::from_signing_key(issuer_key);
+    replica.author_ed25519(
+        delegation_payload(namespace, parent, issuer, receiver),
+        Area::root(namespace),
+        Right::Invoke,
+        vec![parent],
+        issuer_key,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use hhhs_store::MemoryStorage;
@@ -567,5 +587,32 @@ mod tests {
             materialize(&replica.snapshot().history, &[root]).live,
             [degree].into()
         );
+    }
+
+    #[test]
+    fn typed_delegation_authorizes_the_receiver_without_an_acl() {
+        let owner_key = SigningKey::from_bytes(&[1; 32]);
+        let member_key = SigningKey::from_bytes(&[2; 32]);
+        let owner = ActorId::from_signing_key(&owner_key);
+        let member = ActorId::from_signing_key(&member_key);
+        let namespace = Digest::of(b"delegated tutti music object");
+        let (replica, root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
+        let grant = delegate(&replica, namespace, root, &owner_key, member)
+            .unwrap()
+            .entry;
+        let degree = TunedDegree::new(&Tuning::twelve_tet(), 7).unwrap();
+
+        author(
+            &replica,
+            namespace,
+            &member_key,
+            vec![grant],
+            MusicOp::AddDegree { degree },
+        )
+        .unwrap();
+
+        let view = materialize(&replica.snapshot().history, &[root]);
+        assert_eq!(view.live, [degree].into());
+        assert_eq!(view.holders[&degree], [member].into());
     }
 }

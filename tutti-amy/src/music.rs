@@ -1,32 +1,41 @@
-//! The tutti-amy scenario harness: two REAL `Store<MusicLang>` peers partition,
-//! diverge, then exchange signed ops and converge — and the converging fold
+//! The tutti-amy scenario harness: two capability-native HHHS music Replicas
+//! partition, diverge, then exchange repair records and converge — and the converging materializer
 //! drives AMY. This proves the leaf thesis: **verifiable eventually-consistent
 //! convergence produces audio** (docs/research/tutti-amy-esp32-leaf.md,
 //! experiment 1).
 //!
-//! The music *protocol* (`MusicOp`/`MusicLang`/`MusicView`, the fold, tuning
-//! identity, the facet types) lives in `tutti-music`; its convergence suite
-//! travels with it. What stays here is the leaf: the concrete 31-EDO room, the
-//! partition→rejoin scenarios, the AMY driver, and the no-stuck-notes ledger.
+//! The music values live in `tutti-music`; command encoding, capability
+//! admission, materialization, and repair live in `tutti-music-hhhs`. What stays
+//! here is the leaf: the concrete 31-EDO room, the partition→rejoin scenarios,
+//! the AMY driver, and the no-stuck-notes ledger.
 //!
 //! Because the room is a non-12 EDO, degrees resolve to FRACTIONAL MIDI notes —
 //! the microtonal path AMY takes for free.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tutti_core::{SignedOp, Store, VerifiedOpG, signing_key_from_seed, verify_signed_op_in};
+use futures::executor::block_on;
+use hhhs::{DagRead, Digest, EntryHash};
+use hhhs_proof::SigningKey;
+use hhhs_replica::{ReplicaError, ReplicaRepairHost};
+use hhhs_store::MemoryStorage;
+use hhhs_sync::{EntrySource, RepairHost};
 use tutti_music::tuning::{TunedDegree, Tuning, TuningDefinition};
+use tutti_music_hhhs::{ActorId, MusicReplica};
 
-pub use tutti_music::{Envelope, Interp, MusicLang, MusicOp, MusicView};
+pub use tutti_music::{Envelope, Interp, MusicOp};
+pub use tutti_music_hhhs::MusicView;
 
-use crate::{Amy, degrees_to_amy_events, rms};
+use crate::{degrees_to_amy_events, rms, Amy};
 
 // ===========================================================================
 // The room: 31-EDO, anchored so degree 0 sounds middle C.
 // ===========================================================================
 
-/// The room's topic — every op is bound to it (contract: topic-scoped authorship).
-pub const TOPIC: &str = "tutti-amy-music";
+/// Stable object namespace for the AMY music Replica.
+pub fn namespace() -> Digest {
+    Digest::of(b"tutti-amy-music/hhhs-replica/5")
+}
 
 /// The room's tuning: 31 divisions of the octave (display/diagnostics; the
 /// authoritative identity is [`room_definition`]'s `TuningId`).
@@ -42,7 +51,10 @@ const EDO31_KBM: &str = "0\n0\n127\n60\n60\n261.6255653005986\n0\n";
 fn edo31_scl() -> String {
     let mut scl = format!("! generated\n{EDO}-tone equal temperament\n{EDO}\n");
     for step in 1..=EDO {
-        scl.push_str(&format!("{:.6}\n", f64::from(step) * 1200.0 / f64::from(EDO)));
+        scl.push_str(&format!(
+            "{:.6}\n",
+            f64::from(step) * 1200.0 / f64::from(EDO)
+        ));
     }
     scl
 }
@@ -76,128 +88,210 @@ fn indices(view: &MusicView) -> BTreeSet<u16> {
     view.live.iter().map(|d| d.degree.index()).collect()
 }
 
-fn verify(signed: &SignedOp) -> VerifiedOpG<MusicLang> {
-    verify_signed_op_in::<MusicLang>(signed).expect("a signed music op verifies")
+/// One canonical HHHS entry plus the authority presentation required to replay
+/// its admission at another Replica. Carriers move these opaque bytes.
+pub type ReplicaRecord = (EntryHash, Vec<u8>);
+
+/// Minimal AMY-side owner of a capability-native music Replica. It intentionally
+/// knows nothing about sockets, peers, discovery, or mesh policy.
+struct MusicPeer {
+    namespace: Digest,
+    root: EntryHash,
+    key: SigningKey,
+    presented: Vec<EntryHash>,
+    replica: MusicReplica<MemoryStorage>,
 }
 
-/// Construct a fresh `Store<MusicLang>` — so a bin/test can drive convergence
-/// without naming the tutti-core `Store`/`MusicLang` types itself.
-pub fn new_store() -> Store<MusicLang> {
-    Store::new()
+impl MusicPeer {
+    fn new(owner: ActorId, seed: [u8; 32]) -> Result<Self, ReplicaError> {
+        let namespace = namespace();
+        let key = SigningKey::from_bytes(&seed);
+        let actor = ActorId::from_signing_key(&key);
+        let (replica, root) = tutti_music_hhhs::initialize(namespace, owner, MemoryStorage::new())?;
+        Ok(Self {
+            namespace,
+            root,
+            key,
+            presented: (actor == owner).then_some(root).into_iter().collect(),
+            replica,
+        })
+    }
+
+    fn actor(&self) -> ActorId {
+        ActorId::from_signing_key(&self.key)
+    }
+
+    fn author(&self, command: MusicOp) -> Result<EntryHash, ReplicaError> {
+        tutti_music_hhhs::author(
+            &self.replica,
+            self.namespace,
+            &self.key,
+            self.presented.clone(),
+            command,
+        )
+        .map(|outcome| outcome.entry)
+    }
+
+    fn delegate(&self, receiver: ActorId) -> Result<EntryHash, ReplicaError> {
+        tutti_music_hhhs::delegate(
+            &self.replica,
+            self.namespace,
+            self.root,
+            &self.key,
+            receiver,
+        )
+        .map(|outcome| outcome.entry)
+    }
+
+    fn view(&self) -> MusicView {
+        tutti_music_hhhs::materialize(&self.replica.snapshot().history, &[self.root])
+    }
+
+    /// Capture every public entry as carrier-neutral repair bytes. Local secrets
+    /// and materialization checkpoints are deliberately absent.
+    fn records(&self) -> Vec<ReplicaRecord> {
+        let host = ReplicaRepairHost::new(self.replica.clone());
+        let snapshot = host.capture([0x41; 16]).expect("memory capture succeeds");
+        let mut included = BTreeSet::new();
+        let mut records = Vec::new();
+        for hash in self.replica.snapshot().history.all_hashes() {
+            records.extend(snapshot.bytes_with_closure(&hash, &mut included));
+        }
+        records
+    }
+
+    /// Apply a batch in any arrival order, retrying transient missing-parent
+    /// gaps exactly as a carrier-driven repair session would. Durable refusals
+    /// fail the scenario; unresolved records are returned to the caller.
+    fn repair(&self, records: &[ReplicaRecord]) -> Vec<EntryHash> {
+        let mut seen = BTreeSet::new();
+        let mut remaining: Vec<_> = records
+            .iter()
+            .filter(|(hash, _)| seen.insert(*hash))
+            .cloned()
+            .collect();
+        let mut host = ReplicaRepairHost::new(self.replica.clone());
+        while !remaining.is_empty() {
+            let before = remaining.len();
+            let report = block_on(host.apply(&remaining)).expect("memory repair succeeds");
+            assert!(
+                report.refused.is_empty(),
+                "valid music repair was refused: {:?}",
+                report.refused
+            );
+            let admitted: BTreeSet<_> = report.admitted.into_iter().collect();
+            remaining.retain(|(hash, _)| !admitted.contains(hash));
+            if remaining.len() == before {
+                break;
+            }
+        }
+        remaining.into_iter().map(|(hash, _)| hash).collect()
+    }
 }
 
-/// Verify a signed music op into the ingest-ready `VerifiedOpG<MusicLang>`.
-pub fn verify_signed(signed: &SignedOp) -> VerifiedOpG<MusicLang> {
-    verify(signed)
+fn peer_pair(seed_a: [u8; 32], seed_b: [u8; 32]) -> (MusicPeer, MusicPeer) {
+    let owner_key = SigningKey::from_bytes(&seed_a);
+    let owner = ActorId::from_signing_key(&owner_key);
+    let a = MusicPeer::new(owner, seed_a).expect("owner Replica initializes");
+    let mut b = MusicPeer::new(owner, seed_b).expect("member Replica initializes");
+    let member_grant = a
+        .delegate(b.actor())
+        .expect("owner delegates music invocation");
+    assert!(
+        b.repair(&a.records()).is_empty(),
+        "member receives its capability path"
+    );
+    b.presented = vec![member_grant];
+    (a, b)
 }
 
 // ===========================================================================
-// The partition → rejoin scenario, driven by TWO real Store<MusicLang> peers.
+// The partition → rejoin scenario, driven by two real HHHS music Replicas.
 // ===========================================================================
 
 /// The outcome of running the two-peer partition→rejoin scenario. Pure
-/// tutti-core + tutti-music: no AMY, fully testable on its own. Degree sets are
+/// HHHS + tutti-music: no AMY, fully testable on its own. Degree sets are
 /// reported as plain indices in the 31-EDO room.
 pub struct Scenario {
     /// Peer A's view WHILE PARTITIONED (before it saw any of B's ops).
     pub a_partition: BTreeSet<u16>,
     /// Peer B's view WHILE PARTITIONED (before it saw any of A's ops).
     pub b_partition: BTreeSet<u16>,
-    /// Peer A's view AFTER rejoin (ingested B's signed ops).
+    /// Peer A's view AFTER rejoin (admitted B's repair records).
     pub a_converged: BTreeSet<u16>,
-    /// Peer B's view AFTER rejoin (ingested A's signed ops).
+    /// Peer B's view AFTER rejoin (admitted A's repair records).
     pub b_converged: BTreeSet<u16>,
     /// The hand-computed add-wins union oracle — what both peers MUST converge to.
     pub expected_union: BTreeSet<u16>,
     /// The degree B added then retracted; the remove observed the add, so it must
     /// be ABSENT from the union (remove wins ⇒ never sounds after teardown).
     pub removed_degree: u16,
-    /// The leaf's REAL fold outputs over the whole partition→rejoin timeline — each
-    /// a `store.view()` after a commit or the rejoin. Consecutive diffs drive AMY.
+    /// The leaf's real materialized outputs over the partition→rejoin timeline.
+    /// Consecutive diffs drive AMY.
     pub timeline: Vec<BTreeSet<u16>>,
     /// The room tuning used for the audio projection (divisions per octave).
     pub edo: u16,
-    /// Ops parked in A / B after rejoin (must be 0 — liveness, nothing stuck).
-    pub a_pending: usize,
-    pub b_pending: usize,
+    /// Repair records still unresolved after retrying missing-parent gaps.
+    pub a_unresolved: usize,
+    pub b_unresolved: usize,
 }
 
 /// Run the two-peer scenario end to end:
 ///
-/// 1. **Partition.** Both peers commit the room's `SetTuning` (the same
+/// 1. **Bootstrap.** A owns the object capability and delegates invocation to
+///    B. Both Replicas admit the same capability history before partitioning.
+/// 2. **Partition.** Both peers author the room's `SetTuning` (the same
 ///    definition — the register converges either way), then A commits
 ///    `AddDegree`s for a near-just 31-EDO triad (`{0,10,18}`); B commits its own
 ///    degrees AND retracts one (`Add 8, Add 25, Add 5, Remove 5`). They do NOT
 ///    exchange ops — their views diverge. B's `view()` is snapshotted after each
 ///    degree commit → the real fold timeline the leaf's speaker plays while
 ///    partitioned.
-/// 2. **Rejoin.** Each peer `ingest_verified`s the OTHER's signed ops (the
-///    tutti-core convergence path). Both refold to the identical union pitch-set.
+/// 3. **Rejoin.** Each peer admits the other's opaque HHHS repair records through
+///    the ordinary capability-verifying Replica path. Both materialize the
+///    identical union pitch-set.
 ///
 /// Degree 5 is added then removed inside B's own causal chain, so the remove
 /// observes the add and 5 dies; A never touches 5. Under add-wins the union is
 /// `{0, 8, 10, 18, 25}` — 5 is gone (remove wins).
 pub fn run_scenario() -> Scenario {
-    let ka = signing_key_from_seed(&[1u8; 32]);
-    let kb = signing_key_from_seed(&[2u8; 32]);
-    let mut ts: u64 = 1_700_000_000_000_000; // µs, monotone; NOT used for ordering
-    let mut tick = || {
-        let t = ts;
-        ts += 1;
-        t
-    };
-
-    let mut a: Store<MusicLang> = Store::new();
-    let mut b: Store<MusicLang> = Store::new();
+    let (a, b) = peer_pair([1; 32], [2; 32]);
     let definition = room_definition();
 
     // --- Partition: A sets the tuning, then plays a 31-EDO near-just major
     //     triad (steps 0, 10, 18). ---
-    let mut a_ops = vec![a.commit(
-        &ka,
-        TOPIC,
-        tick(),
-        MusicOp::SetTuning {
-            definition: definition.clone(),
-        },
-    )];
+    a.author(MusicOp::SetTuning {
+        definition: definition.clone(),
+    })
+    .expect("A sets the room tuning");
     for pc in [0, 10, 18] {
-        a_ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::AddDegree { degree: degree(pc) }));
+        a.author(MusicOp::AddDegree { degree: degree(pc) })
+            .expect("A authors a degree");
     }
 
     // --- Partition: B, the leaf with a speaker, sets the same tuning, plays 8 &
     //     25 and momentarily 5, then RETRACTS 5. Snapshot B's fold after each
     //     degree commit → the audio timeline.
     let mut timeline: Vec<BTreeSet<u16>> = vec![BTreeSet::new()]; // start silent
-    let mut b_ops = vec![b.commit(
-        &kb,
-        TOPIC,
-        tick(),
-        MusicOp::SetTuning {
-            definition: definition.clone(),
-        },
-    )];
+    b.author(MusicOp::SetTuning { definition })
+        .expect("B sets the room tuning");
     for op in [
         MusicOp::AddDegree { degree: degree(8) },
         MusicOp::AddDegree { degree: degree(25) },
         MusicOp::AddDegree { degree: degree(5) },
         MusicOp::RemoveDegree { degree: degree(5) },
     ] {
-        b_ops.push(b.commit(&kb, TOPIC, tick(), op));
+        b.author(op).expect("B authors a degree transition");
         timeline.push(indices(&b.view()));
     }
 
     let a_partition = indices(&a.view());
     let b_partition = indices(&b.view());
 
-    // --- Rejoin: each peer verifies + ingests the other's SIGNED ops in causal
-    //     (commit) order. ---
-    for signed in &b_ops {
-        a.ingest_verified(verify(signed));
-    }
-    for signed in &a_ops {
-        b.ingest_verified(verify(signed));
-    }
+    // --- Rejoin: the carrier exchanges opaque repair records. The Replica
+    //     replays structural, proof, capability, and application admission. ---
+    let a_unresolved = a.repair(&b.records());
+    let b_unresolved = b.repair(&a.records());
 
     // The leaf's post-rejoin fold: the union clicks into place. This last timeline
     // entry is B's converged view — the audio diff from `{8,25}` adds A's degrees.
@@ -212,8 +306,8 @@ pub fn run_scenario() -> Scenario {
         removed_degree: 5,
         timeline,
         edo: EDO,
-        a_pending: a.pending_len(),
-        b_pending: b.pending_len(),
+        a_unresolved: a_unresolved.len(),
+        b_unresolved: b_unresolved.len(),
     }
 }
 
@@ -369,9 +463,9 @@ pub fn pluck() -> Envelope {
 }
 
 /// Outcome of the two-peer **envelope-facet** partition→rejoin scenario. Pure
-/// tutti-core + tutti-music; no AMY. Both peers concurrently `SetEnvelope` on
+/// HHHS + tutti-music; no AMY. Both peers concurrently `SetEnvelope` on
 /// the SAME degree (`pc_contested`, different curves) and each on a disjoint
-/// degree, then exchange signed ops and converge.
+/// degree, then exchange repair records and converge.
 pub struct EnvelopeScenario {
     /// Peer A's converged `MusicView` (live set + envelope registers).
     pub a_converged: MusicView,
@@ -391,75 +485,66 @@ pub struct EnvelopeScenario {
     pub winner: Envelope,
     /// The other one — what the audio must NOT sound like after convergence.
     pub loser: Envelope,
-    pub a_pending: usize,
-    pub b_pending: usize,
+    pub a_unresolved: usize,
+    pub b_unresolved: usize,
 }
 
-/// The degrees used by the envelope scenario / op-set.
+/// The degrees used by the envelope scenario / repair set.
 const ENV_PC_CONTESTED: u16 = 0;
 const ENV_PC_A_ONLY: u16 = 10;
 const ENV_PC_B_ONLY: u16 = 18;
 
-fn ka_env() -> tutti_core::SigningKey {
-    signing_key_from_seed(&[11u8; 32])
-}
-fn kb_env() -> tutti_core::SigningKey {
-    signing_key_from_seed(&[22u8; 32])
-}
-
 /// One peer's envelope-scenario chain: set the room tuning, then add + envelope
 /// the contested degree and a disjoint one.
-fn envelope_chain(
-    store: &mut Store<MusicLang>,
-    key: &tutti_core::SigningKey,
-    own_pc: u16,
-    env: &Envelope,
-) -> Vec<SignedOp> {
-    let mut ts = 0u64;
-    let mut tick = move || {
-        ts += 1;
-        ts
-    };
-    vec![
-        store.commit(key, TOPIC, tick(), MusicOp::SetTuning { definition: room_definition() }),
-        store.commit(key, TOPIC, tick(), MusicOp::AddDegree { degree: degree(ENV_PC_CONTESTED) }),
-        store.commit(key, TOPIC, tick(), MusicOp::SetEnvelope {
+fn envelope_chain(peer: &MusicPeer, own_pc: u16, env: &Envelope) {
+    for command in [
+        MusicOp::SetTuning {
+            definition: room_definition(),
+        },
+        MusicOp::AddDegree {
+            degree: degree(ENV_PC_CONTESTED),
+        },
+        MusicOp::SetEnvelope {
             degree: degree(ENV_PC_CONTESTED),
             env: env.clone(),
-        }),
-        store.commit(key, TOPIC, tick(), MusicOp::AddDegree { degree: degree(own_pc) }),
-        store.commit(key, TOPIC, tick(), MusicOp::SetEnvelope {
+        },
+        MusicOp::AddDegree {
+            degree: degree(own_pc),
+        },
+        MusicOp::SetEnvelope {
             degree: degree(own_pc),
             env: env.clone(),
-        }),
-    ]
+        },
+    ] {
+        peer.author(command).expect("envelope command is admitted");
+    }
+}
+
+fn envelope_peers() -> (MusicPeer, MusicPeer) {
+    let (a, b) = peer_pair([11; 32], [22; 32]);
+    envelope_chain(&a, ENV_PC_A_ONLY, &swell());
+    envelope_chain(&b, ENV_PC_B_ONLY, &pluck());
+    (a, b)
 }
 
 /// Run the two-peer envelope-facet scenario: A and B each build an independent
 /// causal chain (so their contested-degree writes are genuinely CONCURRENT), then
-/// each `ingest_verified`s the other's signed ops and refolds. Returns both
-/// converged views + the resolved winner.
+/// each admits the other's repair records. Returns both converged views + the
+/// resolved winner.
 pub fn run_envelope_scenario() -> EnvelopeScenario {
-    let (ka, kb) = (ka_env(), kb_env());
-    let mut a: Store<MusicLang> = Store::new();
-    let mut b: Store<MusicLang> = Store::new();
     let (env_a, env_b) = (swell(), pluck());
-
-    let a_ops = envelope_chain(&mut a, &ka, ENV_PC_A_ONLY, &env_a);
-    let b_ops = envelope_chain(&mut b, &kb, ENV_PC_B_ONLY, &env_b);
-
-    // Rejoin: exchange signed ops.
-    for signed in &b_ops {
-        a.ingest_verified(verify(signed));
-    }
-    for signed in &a_ops {
-        b.ingest_verified(verify(signed));
-    }
+    let (a, b) = envelope_peers();
+    let a_unresolved = a.repair(&b.records());
+    let b_unresolved = b.repair(&a.records());
 
     let a_converged = a.view();
     let b_converged = b.view();
     let winner = a_converged.envelopes[&degree(ENV_PC_CONTESTED)].clone();
-    let loser = if winner == env_a { env_b.clone() } else { env_a.clone() };
+    let loser = if winner == env_a {
+        env_b.clone()
+    } else {
+        env_a.clone()
+    };
 
     EnvelopeScenario {
         a_converged,
@@ -471,21 +556,33 @@ pub fn run_envelope_scenario() -> EnvelopeScenario {
         env_b,
         winner,
         loser,
-        a_pending: a.pending_len(),
-        b_pending: b.pending_len(),
+        a_unresolved: a_unresolved.len(),
+        b_unresolved: b_unresolved.len(),
     }
 }
 
-/// The raw signed op-set behind [`run_envelope_scenario`] (A's chain then B's) —
-/// two mutually-concurrent chains — for order-independence / determinism tests
-/// that ingest it in many arrival orders into fresh stores.
-pub fn envelope_op_set() -> Vec<SignedOp> {
-    let (ka, kb) = (ka_env(), kb_env());
-    let mut a: Store<MusicLang> = Store::new();
-    let mut b: Store<MusicLang> = Store::new();
-    let mut ops = envelope_chain(&mut a, &ka, ENV_PC_A_ONLY, &swell());
-    ops.extend(envelope_chain(&mut b, &kb, ENV_PC_B_ONLY, &pluck()));
-    ops
+/// The carrier-neutral repair set behind [`run_envelope_scenario`] (A's branch
+/// then B's), for arrival-order and determinism tests.
+pub fn envelope_record_set() -> Vec<ReplicaRecord> {
+    let (a, b) = envelope_peers();
+    let mut seen = BTreeSet::new();
+    a.records()
+        .into_iter()
+        .chain(b.records())
+        .filter(|(hash, _)| seen.insert(*hash))
+        .collect()
+}
+
+/// Admit one envelope repair set into a fresh observer and materialize it.
+pub fn materialize_envelope_records(records: &[ReplicaRecord]) -> MusicView {
+    let owner_key = SigningKey::from_bytes(&[11; 32]);
+    let owner = ActorId::from_signing_key(&owner_key);
+    let observer = MusicPeer::new(owner, [33; 32]).expect("observer Replica initializes");
+    assert!(
+        observer.repair(records).is_empty(),
+        "the complete repair set resolves"
+    );
+    observer.view()
 }
 
 /// Play a single held degree `pc` under envelope facet `env` and capture it:
@@ -534,7 +631,13 @@ pub fn envelope_note_on_wire(pc: u16, env: &Envelope, tuning: &Tuning) -> Vec<St
     let d = TunedDegree::new(tuning, pc).expect("degree within the tuning");
     let mut envs = BTreeMap::new();
     envs.insert(d, env.clone());
-    degrees_to_amy_events(&BTreeSet::new(), &BTreeSet::from([d]), &envs, tuning, MAX_OSCS)
+    degrees_to_amy_events(
+        &BTreeSet::new(),
+        &BTreeSet::from([d]),
+        &envs,
+        tuning,
+        MAX_OSCS,
+    )
 }
 
 /// Least-squares slope of a per-block RMS series vs. block index (RMS units per
@@ -553,5 +656,9 @@ pub fn rms_slope(rmss: &[f64]) -> f64 {
         num += dx * (y - mean_y);
         den += dx * dx;
     }
-    if den == 0.0 { 0.0 } else { num / den }
+    if den == 0.0 {
+        0.0
+    } else {
+        num / den
+    }
 }

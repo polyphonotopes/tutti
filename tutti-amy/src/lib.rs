@@ -13,9 +13,9 @@
 //!    pitch-set — "reconciliation upstream, events downstream"
 //!    (docs/research/tutti-amy-esp32-leaf.md §3.1).
 //!
-//! The music *protocol* — `MusicOp`/`MusicLang`, tuning identity, the
-//! [`Envelope`]/[`Interp`] facet types — lives in `tutti-music`; this crate
-//! only compiles its values for one target.
+//! The music values live in `tutti-music`; capability admission,
+//! materialization, and repair live in `tutti-music-hhhs`. This crate only
+//! compiles the resulting values for one target.
 //!
 //! AMY is a global singleton (one `amy_global`), so `Amy::start()` hands out a
 //! single guard; construct at most one at a time.
@@ -25,14 +25,14 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tutti_music::render::{PitchSetDiff, fractional_midi};
+use tutti_music::render::{fractional_midi, PitchSetDiff};
 use tutti_music::tuning::{PeriodicPitch, TunedDegree, Tuning};
 
 /// The op-payload facet types, re-exported from the protocol crate so this
 /// crate's callers keep their `tutti_amy::Envelope` spellings.
 pub use tutti_music::facets::{Envelope, Interp, MAX_ENV_LEVEL, MAX_ENV_POINTS};
 
-/// The two-peer partition→rejoin scenario + AMY driver over `Store<MusicLang>`
+/// The two-peer partition→rejoin scenario + AMY driver over HHHS music Replicas
 /// (docs/research/tutti-amy-esp32-leaf.md, experiment 1).
 pub mod music;
 

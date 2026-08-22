@@ -4,8 +4,8 @@
 //! Run: `cargo run` inside tutti-amy/ (AMY is compiled by build.rs).
 //!
 //!   Checkpoint 1: prove Rust ↔ AMY renders non-silent audio (raw oscillator).
-//!   Checkpoint 2: run the REAL two-peer partition→rejoin scenario over
-//!                 `Store<MusicLang>` and drive AMY from its converging fold —
+//!   Checkpoint 2: run the real two-Replica partition→rejoin scenario over
+//!                 HHHS 0.4 repair and drive AMY from its converging view —
 //!                 the same path the acceptance test asserts.
 //!   Checkpoint 3: dump the partition→rejoin render to partition-rejoin.wav so a
 //!                 human can hear the union click into place.
@@ -69,9 +69,12 @@ fn main() {
     // ------------------------------------------------------------------
     // Checkpoint 2 — the REAL partition→rejoin scenario drives AMY.
     // ------------------------------------------------------------------
-    println!("\n--- Checkpoint 2: two Store<MusicLang> peers, partition → rejoin ---");
+    println!("\n--- Checkpoint 2: two HHHS music Replicas, partition → rejoin ---");
     let s = music::run_scenario();
-    println!("  partition:  A.view={:?}   B.view={:?}", s.a_partition, s.b_partition);
+    println!(
+        "  partition:  A.view={:?}   B.view={:?}",
+        s.a_partition, s.b_partition
+    );
     assert_ne!(s.a_partition, s.b_partition, "partition views must differ");
     println!(
         "  rejoin:     A.view={:?}  ==  B.view={:?}",
@@ -98,10 +101,16 @@ fn main() {
     println!("    wire events: {:?}", report.events);
 
     let union_rms = report.step_rms[s.timeline.len() - 1];
-    assert!(union_rms > report.step_rms[2], "union must be louder than the 2-note partition chord");
+    assert!(
+        union_rms > report.step_rms[2],
+        "union must be louder than the 2-note partition chord"
+    );
     assert_eq!(report.note_ons, report.note_offs, "balanced note on/off");
     assert!(report.stuck_oscs.is_empty(), "no stuck notes");
-    assert!(report.teardown_rms < union_rms * 0.2, "silent after release");
+    assert!(
+        report.teardown_rms < union_rms * 0.2,
+        "silent after release"
+    );
     println!(
         "  PASS: union ({union_rms:.4}) louder than partition; {} on / {} off balanced; silent tail ({:.4}) — NO STUCK NOTES.",
         report.note_ons, report.note_offs, report.teardown_rms
@@ -131,7 +140,7 @@ fn main() {
     // ------------------------------------------------------------------
     // Checkpoint 4 — a CONTINUOUS FACET converges and shapes synthesis.
     //   Two peers concurrently SetEnvelope on the SAME degree (a slow swell vs a
-    //   fast pluck), exchange signed ops, and converge to the causal-maxima winner.
+    //   fast pluck), exchange repair records, and converge to the causal-maxima winner.
     //   The converged CURVE (not samples — the function) drives AMY's amplitude EG,
     //   and the RMS trajectory reflects it: the swell rises, the pluck falls.
     // ------------------------------------------------------------------
@@ -143,9 +152,12 @@ fn main() {
         envelope_to_amy(&es.env_a),
         envelope_to_amy(&es.env_b),
     );
-    assert_eq!(es.a_converged, es.b_converged, "envelope facets must converge");
-    assert_eq!(es.a_pending, 0);
-    assert_eq!(es.b_pending, 0);
+    assert_eq!(
+        es.a_converged, es.b_converged,
+        "envelope facets must converge"
+    );
+    assert_eq!(es.a_unresolved, 0);
+    assert_eq!(es.b_unresolved, 0);
     println!(
         "  converged: envelope[{}] = {} (causal-maxima winner); disjoint regs 10 & 18 both kept.",
         es.pc_contested,
@@ -155,21 +167,43 @@ fn main() {
     // Render the two curves and show the RMS trajectory each produces.
     const HELD: usize = 70;
     const TAIL: usize = 30;
-    let (_, swell_rms) = music::render_held_with_envelope(&amy, es.pc_contested, &music::swell(), &tuning, HELD, TAIL);
-    let (_, pluck_rms) = music::render_held_with_envelope(&amy, es.pc_contested, &music::pluck(), &tuning, HELD, TAIL);
+    let (_, swell_rms) = music::render_held_with_envelope(
+        &amy,
+        es.pc_contested,
+        &music::swell(),
+        &tuning,
+        HELD,
+        TAIL,
+    );
+    let (_, pluck_rms) = music::render_held_with_envelope(
+        &amy,
+        es.pc_contested,
+        &music::pluck(),
+        &tuning,
+        HELD,
+        TAIL,
+    );
     let (swell_slope, pluck_slope) = (music::rms_slope(&swell_rms), music::rms_slope(&pluck_rms));
     let early = |r: &[f64]| mean(&r[2..8]);
     let late = |r: &[f64]| mean(&r[r.len() - 8..]);
     println!(
         "    swell: rms {:.4} -> {:.4}  slope {swell_slope:+.6}/block (rises)",
-        early(&swell_rms), late(&swell_rms)
+        early(&swell_rms),
+        late(&swell_rms)
     );
     println!(
         "    pluck: rms {:.4} -> {:.4}  slope {pluck_slope:+.6}/block (falls)",
-        early(&pluck_rms), late(&pluck_rms)
+        early(&pluck_rms),
+        late(&pluck_rms)
     );
-    assert!(swell_slope > 0.0 && pluck_slope < 0.0, "swell rises, pluck falls");
-    assert!(pluck_slope < swell_slope, "the pluck decays faster than the swell swells");
+    assert!(
+        swell_slope > 0.0 && pluck_slope < 0.0,
+        "swell rises, pluck falls"
+    );
+    assert!(
+        pluck_slope < swell_slope,
+        "the pluck decays faster than the swell swells"
+    );
     println!("  PASS: the converged breakpoints actually shaped the loudness contour.");
 
     // Write envelope-converge.wav: the loser's curve, then the converged winner's —
@@ -178,12 +212,14 @@ fn main() {
     for _ in 0..8 {
         env_wav.extend_from_slice(&amy.render_block());
     }
-    let (loser_pcm, _) = music::render_held_with_envelope(&amy, es.pc_contested, &es.loser, &tuning, HELD, TAIL);
+    let (loser_pcm, _) =
+        music::render_held_with_envelope(&amy, es.pc_contested, &es.loser, &tuning, HELD, TAIL);
     env_wav.extend_from_slice(&loser_pcm);
     for _ in 0..16 {
         env_wav.extend_from_slice(&amy.render_block());
     }
-    let (winner_pcm, _) = music::render_held_with_envelope(&amy, es.pc_contested, &es.winner, &tuning, HELD, TAIL);
+    let (winner_pcm, _) =
+        music::render_held_with_envelope(&amy, es.pc_contested, &es.winner, &tuning, HELD, TAIL);
     env_wav.extend_from_slice(&winner_pcm);
     let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/envelope-converge.wav");
     match write_wav(env_path, &env_wav, sample_rate() as u32, nchans() as u16) {
@@ -195,6 +231,9 @@ fn main() {
         Err(err) => eprintln!("could not write envelope WAV: {err}"),
     }
 
-    println!("\nfinal sysclock = {} ms. all checkpoints passed.", amy.sysclock());
+    println!(
+        "\nfinal sysclock = {} ms. all checkpoints passed.",
+        amy.sysclock()
+    );
     drop(amy); // amy_stop()
 }

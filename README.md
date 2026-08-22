@@ -10,12 +10,14 @@ layer is `tutti-music-hhhs`; networking remains an application concern.
   admission policy, production Replica builder, deterministic roots, and
   rebuildable materializer. It owns no endpoint, mesh, carrier, task runtime,
   clock, filesystem, or application-extension state.
-- `tutti-core` — the older generic signed-state/fold substrate used by the
-  standalone bridge crates; it is not the Walkie room-v5 authority or sync host.
+- `tutti-core` — the older generic signed-state/fold substrate retained for
+  compatibility and fold/compaction conformance; it is not a production 0.4
+  authority or sync host.
 - `tutti-midi` — MIDI input/output with state rediff on reconnect.
 - `tutti-osc` — OSC output.
-- `tutti-amy` — AMY C synth bridge; excluded from the default workspace because
-  it requires a C toolchain.
+- `tutti-amy` — AMY C synth leaf driven by the same capability-native music
+  Replica and repair records; excluded from the default workspace because it
+  requires a C toolchain.
 
 Walkie room v5 imports `tutti-music-hhhs` directly and composes its production
 music Replica with a separate application-extension Replica. A bare music peer
@@ -25,6 +27,7 @@ without learning Walkie's extension lane.
 ```sh
 cargo test -p tutti-music-hhhs
 cargo clippy -p tutti-music-hhhs --all-targets -- -D warnings
+cargo test --manifest-path tutti-amy/Cargo.toml --all-features
 ```
 
 The generation-5 music wire is deliberately distinct from earlier Walkie/Tutti

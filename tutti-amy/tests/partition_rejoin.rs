@@ -15,7 +15,6 @@
 //!      NO STUCK NOTES — every note-on matched by a note-off);
 //!   3. writes `partition-rejoin.wav` so a human can hear the union click into place.
 
-
 use tutti_amy::music::{self, EDO};
 use tutti_amy::{nchans, sample_rate, write_wav, Amy};
 
@@ -25,7 +24,7 @@ const TEARDOWN_BLOCKS: usize = 40; // ~232 ms release tail — long enough to de
 #[test]
 fn partition_rejoin_drives_amy_with_no_stuck_notes() {
     // ------------------------------------------------------------------
-    // Part 1 — CONVERGENCE (pure tutti-core, two real Store<MusicLang> peers).
+    // Part 1 — CONVERGENCE (two capability-native HHHS music Replicas).
     // ------------------------------------------------------------------
     let s = music::run_scenario();
 
@@ -37,7 +36,7 @@ fn partition_rejoin_drives_amy_with_no_stuck_notes() {
         "partitioned peers must hold DIFFERENT views"
     );
 
-    println!("=== rejoin (ingest_verified the other's signed ops) ===");
+    println!("=== rejoin (admit the other's opaque repair records) ===");
     println!("  A.view (converged)   = {:?}", s.a_converged);
     println!("  B.view (converged)   = {:?}", s.b_converged);
     println!("  expected union       = {:?}", s.expected_union);
@@ -51,8 +50,8 @@ fn partition_rejoin_drives_amy_with_no_stuck_notes() {
         "degree {} was removed and the remove MUST win (silent forever)",
         s.removed_degree
     );
-    assert_eq!(s.a_pending, 0, "liveness: no op parked in A");
-    assert_eq!(s.b_pending, 0, "liveness: no op parked in B");
+    assert_eq!(s.a_unresolved, 0, "liveness: no repair unresolved in A");
+    assert_eq!(s.b_unresolved, 0, "liveness: no repair unresolved in B");
     println!(
         "  PASS convergence: views diverged then converged to the union; degree {} removed.",
         s.removed_degree
@@ -85,7 +84,10 @@ fn partition_rejoin_drives_amy_with_no_stuck_notes() {
     let union = report.step_rms[s.timeline.len() - 1]; // {0,8,10,18,25} — five notes
 
     // Non-silent while playing.
-    assert!(single > 0.01, "single note must be audible (rms {single:.4})");
+    assert!(
+        single > 0.01,
+        "single note must be audible (rms {single:.4})"
+    );
 
     // RMS reflects chord SIZE: three notes louder than two; the union (5 notes)
     // louder than the partition-final two-note chord — the union really is fuller.
@@ -111,7 +113,10 @@ fn partition_rejoin_drives_amy_with_no_stuck_notes() {
         "every note-on must be matched by a note-off ({} on / {} off)",
         report.note_ons, report.note_offs
     );
-    assert_eq!(report.unmatched_offs, 0, "no note-off hit a silent oscillator");
+    assert_eq!(
+        report.unmatched_offs, 0,
+        "no note-off hit a silent oscillator"
+    );
     assert!(
         report.stuck_oscs.is_empty(),
         "STUCK NOTE(S): oscillators still sounding after teardown: {:?}",
@@ -150,8 +155,7 @@ fn partition_rejoin_drives_amy_with_no_stuck_notes() {
     // Part 3 — write the WAV so a human can hear the union click into place.
     // ------------------------------------------------------------------
     let wav = concat!(env!("CARGO_MANIFEST_DIR"), "/partition-rejoin.wav");
-    write_wav(wav, &report.pcm, sample_rate() as u32, nchans() as u16)
-        .expect("wav writes");
+    write_wav(wav, &report.pcm, sample_rate() as u32, nchans() as u16).expect("wav writes");
     let frames = report.pcm.len() / nchans();
     println!(
         "  wrote {wav} ({frames} frames, {:.2} s)",
