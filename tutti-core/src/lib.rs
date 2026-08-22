@@ -38,9 +38,9 @@ pub mod merkle;
 
 pub use ops::{
     AuthorId, LogHead, MAX_OBSERVED_OPS, MAX_SIGNED_HEADER_BYTES, MAX_SIGNED_OP_WIRE_BYTES,
-    MAX_SIGNED_PAYLOAD_BYTES, MAX_TOPIC_BYTES, OpId, OpLanguage, OpVerifyError, SIGNED_OP_WIRE_MAGIC,
-    SignedOp, SignedOpWireError, SigningKey, VerifiedOpG, VerifyingKey, VersionedOpG,
-    sign_versioned_op, signing_key_from_seed, verify_signed_op_in,
+    MAX_SIGNED_PAYLOAD_BYTES, MAX_TOPIC_BYTES, OpId, OpLanguage, OpVerifyError,
+    SIGNED_OP_WIRE_MAGIC, SignedOp, SignedOpWireError, SigningKey, VerifiedOpG, VerifyingKey,
+    VersionedOpG, sign_versioned_op, signing_key_from_seed, verify_signed_op_in,
 };
 pub use retain::causal_maxima;
 pub use store::{DecodedOp, FoldCtx, Store, sync_root_of};

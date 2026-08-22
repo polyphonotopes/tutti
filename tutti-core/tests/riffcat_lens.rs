@@ -139,9 +139,7 @@ impl OpLanguage for RiffLang {
         for (entry, decoded) in ctx.decoded() {
             match decoded.op() {
                 RiffOp::AddDegree { degree } => adds.entry(*degree).or_default().push(*entry),
-                RiffOp::RemoveDegree { degree } => {
-                    removes.entry(*degree).or_default().push(*entry)
-                }
+                RiffOp::RemoveDegree { degree } => removes.entry(*degree).or_default().push(*entry),
             }
         }
 
@@ -259,7 +257,11 @@ fn trans_normal_form(pcs: &BTreeSet<u16>, edo: u16) -> BTreeSet<u16> {
 fn prime_form(pcs: &BTreeSet<u16>, edo: u16) -> Vec<u16> {
     let tnf = trans_normal_form(pcs, edo);
     let inv_tnf = trans_normal_form(&invert(pcs, edo), edo);
-    let chosen = if rahn_le(&tnf, &inv_tnf, edo) { tnf } else { inv_tnf };
+    let chosen = if rahn_le(&tnf, &inv_tnf, edo) {
+        tnf
+    } else {
+        inv_tnf
+    };
     chosen.into_iter().collect()
 }
 
@@ -340,12 +342,32 @@ fn grounding_reproduces_riffcat_forte_prime_forms() {
     // The set-class (T/I) prime forms — Music.agda `primeForm ... ≡ ...`.
     // C major {0,4,7}, A minor {0,4,9}, C minor {0,3,7}, G major {2,7,11} all land
     // on Forte 3-11, prime form [0,3,7] (the headline collapse).
-    assert_eq!(prime_form(&set([0, 4, 7]), edo), vec![0, 3, 7], "C major → 3-11");
-    assert_eq!(prime_form(&set([0, 4, 9]), edo), vec![0, 3, 7], "A minor → 3-11");
-    assert_eq!(prime_form(&set([0, 3, 7]), edo), vec![0, 3, 7], "C minor → 3-11");
-    assert_eq!(prime_form(&set([2, 7, 11]), edo), vec![0, 3, 7], "G major → 3-11");
+    assert_eq!(
+        prime_form(&set([0, 4, 7]), edo),
+        vec![0, 3, 7],
+        "C major → 3-11"
+    );
+    assert_eq!(
+        prime_form(&set([0, 4, 9]), edo),
+        vec![0, 3, 7],
+        "A minor → 3-11"
+    );
+    assert_eq!(
+        prime_form(&set([0, 3, 7]), edo),
+        vec![0, 3, 7],
+        "C minor → 3-11"
+    );
+    assert_eq!(
+        prime_form(&set([2, 7, 11]), edo),
+        vec![0, 3, 7],
+        "G major → 3-11"
+    );
     // Non-collapse: the augmented triad is Forte 3-12, prime form [0,4,8].
-    assert_eq!(prime_form(&set([0, 4, 8]), edo), vec![0, 4, 8], "aug → 3-12");
+    assert_eq!(
+        prime_form(&set([0, 4, 8]), edo),
+        vec![0, 4, 8],
+        "aug → 3-12"
+    );
     // The PACKING-RULE witness: the minor seventh {0,4,7,9} is Forte 4-26, whose
     // compact prime form is [0,3,5,8] (NOT the lex-least [0,2,5,9]) — the exact case
     // riff-cat's engine `prime_form` fix pinned.
@@ -358,8 +380,12 @@ fn grounding_reproduces_riffcat_forte_prime_forms() {
     // The A/B distinction at the FINER Tn level: major and minor are DISTINCT
     // transposition classes (3-11B [0,4,7] vs 3-11A [0,3,7]) — the inversion the
     // set-class prime form folds. `~T` refines `~SC`.
-    let major_tnf: Vec<u16> = trans_normal_form(&set([0, 4, 7]), edo).into_iter().collect();
-    let minor_tnf: Vec<u16> = trans_normal_form(&set([0, 4, 9]), edo).into_iter().collect();
+    let major_tnf: Vec<u16> = trans_normal_form(&set([0, 4, 7]), edo)
+        .into_iter()
+        .collect();
+    let minor_tnf: Vec<u16> = trans_normal_form(&set([0, 4, 9]), edo)
+        .into_iter()
+        .collect();
     assert_eq!(major_tnf, vec![0, 4, 7], "major Tn = 3-11B");
     assert_eq!(minor_tnf, vec![0, 3, 7], "minor Tn = 3-11A");
     assert_ne!(major_tnf, minor_tnf, "Tn keeps major/minor apart (A/B)…");
@@ -428,7 +454,11 @@ fn lens_commutes_with_convergence() {
     ingest_all(&mut b, &b_ops);
 
     // Partitioned: the peers' pitch-sets AND their lensed set-classes differ.
-    assert_ne!(a.view(), b.view(), "partitioned peers must diverge (pitch-set)");
+    assert_ne!(
+        a.view(),
+        b.view(),
+        "partitioned peers must diverge (pitch-set)"
+    );
     assert_ne!(
         set_class_of_pitch_set(&a.view(), edo),
         set_class_of_pitch_set(&b.view(), edo),
@@ -450,11 +480,19 @@ fn lens_commutes_with_convergence() {
     let pcs_a = pitch_set_to_pcs(&a.view(), edo);
     let pcs_b = pitch_set_to_pcs(&b.view(), edo);
     assert_eq!(pcs_a, pcs_b, "PCS identical across converged peers");
-    assert_eq!(pcs_a, set([0, 4, 7]), "PCS == {{0,4,7}} (octaves collapsed)");
+    assert_eq!(
+        pcs_a,
+        set([0, 4, 7]),
+        "PCS == {{0,4,7}} (octaves collapsed)"
+    );
     let sc_a = pcs_to_set_class(&pcs_a, edo);
     let sc_b = pcs_to_set_class(&pcs_b, edo);
     assert_eq!(sc_a, sc_b, "set-class identical across converged peers");
-    assert_eq!(sc_a, SetClass(vec![0, 3, 7]), "set-class == Forte 3-11 [0,3,7]");
+    assert_eq!(
+        sc_a,
+        SetClass(vec![0, 3, 7]),
+        "set-class == Forte 3-11 [0,3,7]"
+    );
 
     // The lens of view() equals the lens of the kernel oracle view_reference() — the
     // SAME fold on the Θ(N²) kernel index, no drift.
@@ -480,7 +518,11 @@ fn lens_commutes_with_convergence() {
         ingest_all(&mut s, &shuffled(&all, seed));
         assert_eq!(s.pending_len(), 0, "seed {seed} left ops parked");
         assert_eq!(s.view(), expected_ps, "shuffle {seed} diverged (pitch-set)");
-        assert_eq!(pitch_set_to_pcs(&s.view(), edo), set([0, 4, 7]), "shuffle {seed} PCS");
+        assert_eq!(
+            pitch_set_to_pcs(&s.view(), edo),
+            set([0, 4, 7]),
+            "shuffle {seed} PCS"
+        );
         assert_eq!(
             set_class_of_pitch_set(&s.view(), edo),
             SetClass(vec![0, 3, 7]),
@@ -533,7 +575,10 @@ fn projection_retraction_and_noninvertibility() {
             let sc = pcs_to_set_class(&pcs, edo);
             // The prime form is itself a valid pcs; re-normalizing is a no-op.
             let sc_again = pcs_to_set_class(&sc.0.iter().copied().collect(), edo);
-            assert_eq!(sc, sc_again, "retraction not idempotent for {chord:?} @ edo {edo}");
+            assert_eq!(
+                sc, sc_again,
+                "retraction not idempotent for {chord:?} @ edo {edo}"
+            );
             // A prime form always starts at 0 (canonical).
             assert_eq!(sc.0.first(), Some(&0), "prime form must start at 0");
         }
@@ -561,14 +606,21 @@ fn projection_retraction_and_noninvertibility() {
     // A third witness folding the same:
     let ps3 = set([0, 4, 7, 12]); // adds a doubled pc 0
     assert_ne!(ps3, ps1);
-    assert_eq!(pitch_set_to_pcs(&ps3, edo), pitch_set_to_pcs(&ps1, edo), "PS↠PCS not injective");
+    assert_eq!(
+        pitch_set_to_pcs(&ps3, edo),
+        pitch_set_to_pcs(&ps1, edo),
+        "PS↠PCS not injective"
+    );
 
     // PCS ↠ set-class: distinct pitch-class-sets share a set-class. C major {0,4,7}
     // and A minor {0,4,9} are DIFFERENT PCS but ONE set-class (Forte 3-11) — the
     // dihedral fold. So the coercion cannot be inverted.
     let pcs_major = set([0, 4, 7]);
     let pcs_minor = set([0, 4, 9]);
-    assert_ne!(pcs_major, pcs_minor, "C major and A minor are distinct pitch-class-sets");
+    assert_ne!(
+        pcs_major, pcs_minor,
+        "C major and A minor are distinct pitch-class-sets"
+    );
     assert_eq!(
         pcs_to_set_class(&pcs_major, edo),
         pcs_to_set_class(&pcs_minor, edo),
@@ -653,7 +705,11 @@ fn transposition_and_inversion_invariance() {
         plain.commit(&ka, TOPIC, TS_BASE + i as u64, add(d));
         shifted.commit(&kb, TOPIC, TS_BASE + i as u64, add((d + 5) % edo)); // T5
     }
-    assert_ne!(plain.view(), shifted.view(), "the transposed pitch-sets differ");
+    assert_ne!(
+        plain.view(),
+        shifted.view(),
+        "the transposed pitch-sets differ"
+    );
     assert_ne!(
         pitch_set_to_pcs(&plain.view(), edo),
         pitch_set_to_pcs(&shifted.view(), edo),
@@ -696,7 +752,11 @@ fn baseline_triad_ops() -> (Vec<SignedOp>, SetClass) {
 fn adversarial_laggard_equivocation_shuffle_microtonal() {
     let edo = 12;
     let (base, oracle_sc) = baseline_triad_ops();
-    assert_eq!(oracle_sc, SetClass(vec![0, 3, 7]), "baseline lenses to 3-11");
+    assert_eq!(
+        oracle_sc,
+        SetClass(vec![0, 3, 7]),
+        "baseline lenses to 3-11"
+    );
 
     // --- (a) SHUFFLED ARRIVAL: many permutations → identical lens. ---
     #[cfg(feature = "merkle")]
@@ -705,7 +765,11 @@ fn adversarial_laggard_equivocation_shuffle_microtonal() {
         let mut s: Store<RiffLang> = Store::new();
         ingest_all(&mut s, &shuffled(&base, seed));
         assert_eq!(s.pending_len(), 0, "seed {seed} parked");
-        assert_eq!(set_class_of_pitch_set(&s.view(), edo), oracle_sc, "shuffle {seed} lens");
+        assert_eq!(
+            set_class_of_pitch_set(&s.view(), edo),
+            oracle_sc,
+            "shuffle {seed} lens"
+        );
         #[cfg(feature = "test-support")]
         assert_eq!(s.view(), s.view_reference());
         #[cfg(feature = "merkle")]
@@ -713,7 +777,10 @@ fn adversarial_laggard_equivocation_shuffle_microtonal() {
     }
     #[cfg(feature = "merkle")]
     for r in &roots {
-        assert_eq!(r, &roots[0], "ops_root differs across permutations of the same set");
+        assert_eq!(
+            r, &roots[0],
+            "ops_root differs across permutations of the same set"
+        );
     }
 
     // --- (b) LAGGARD / deferral: ingest the causally-LATEST op first → it PARKS;
@@ -721,10 +788,17 @@ fn adversarial_laggard_equivocation_shuffle_microtonal() {
     let mut lag: Store<RiffLang> = Store::new();
     let latest = base.last().expect("non-empty");
     let lifted = lag.ingest_verified(verify(latest));
-    assert!(lifted.is_empty(), "the causally-latest op parks (incomplete past)");
+    assert!(
+        lifted.is_empty(),
+        "the causally-latest op parks (incomplete past)"
+    );
     assert!(lag.pending_len() >= 1, "it is parked");
     ingest_all(&mut lag, &base[..base.len() - 1]);
-    assert_eq!(lag.pending_len(), 0, "liveness: nothing stuck after backfill");
+    assert_eq!(
+        lag.pending_len(),
+        0,
+        "liveness: nothing stuck after backfill"
+    );
     assert_eq!(
         set_class_of_pitch_set(&lag.view(), edo),
         oracle_sc,
@@ -762,7 +836,11 @@ fn adversarial_laggard_equivocation_shuffle_microtonal() {
         base.len() + 2,
         "both equivocating forks lift as distinct entries (no dedup across the fork)",
     );
-    assert_eq!(peer_x.view(), peer_y.view(), "peers converge under equivocation (pitch-set)");
+    assert_eq!(
+        peer_x.view(),
+        peer_y.view(),
+        "peers converge under equivocation (pitch-set)"
+    );
     assert_eq!(
         set_class_of_pitch_set(&peer_x.view(), edo),
         set_class_of_pitch_set(&peer_y.view(), edo),
@@ -801,11 +879,19 @@ fn adversarial_laggard_equivocation_shuffle_microtonal() {
     assert_eq!(m.pending_len(), 0);
     assert_eq!(n.pending_len(), 0);
     let pcs31 = pitch_set_to_pcs(&m.view(), edo31);
-    assert_eq!(pcs31, set([0, 10, 18]), "31-EDO PCS is integer (fractional-free)");
+    assert_eq!(
+        pcs31,
+        set([0, 10, 18]),
+        "31-EDO PCS is integer (fractional-free)"
+    );
     // Every pitch class is a well-defined integer in 0..31.
     assert!(pcs31.iter().all(|&p| p < edo31), "pcs live in Z_31");
     let sc31 = pcs_to_set_class(&pcs31, edo31);
-    assert_eq!(sc31.0.first(), Some(&0), "31-EDO set-class prime form starts at 0");
+    assert_eq!(
+        sc31.0.first(),
+        Some(&0),
+        "31-EDO set-class prime form starts at 0"
+    );
     // The 31-EDO set-class is transposition-invariant like the 12-EDO one.
     let shifted31 = transpose(&pcs31, 7, edo31);
     assert_eq!(
@@ -813,7 +899,11 @@ fn adversarial_laggard_equivocation_shuffle_microtonal() {
         sc31,
         "31-EDO set-class transposition-invariant",
     );
-    assert_eq!(sc31, SetClass(vec![0, 8, 18]), "31-EDO near-just triad set-class [0,8,18]");
+    assert_eq!(
+        sc31,
+        SetClass(vec![0, 8, 18]),
+        "31-EDO near-just triad set-class [0,8,18]"
+    );
 
     println!(
         "PASS gate 4 (adversarial): 6 shuffles → identical set-class + ops_root; laggard \

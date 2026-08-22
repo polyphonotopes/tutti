@@ -25,8 +25,8 @@ use hhhs::cover::ReachIndex;
 use hhhs::{DagRead, GrowthEpoch};
 
 use tutti_core::{
-    AuthorId, EntryHash, FoldCtx, LogHead, OpId, OpLanguage, Reach, SignedOp, SigningKey,
-    Store, VerifiedOpG, VersionedOpG, WindowedStore, causal_maxima, sign_versioned_op,
+    AuthorId, EntryHash, FoldCtx, LogHead, OpId, OpLanguage, Reach, SignedOp, SigningKey, Store,
+    VerifiedOpG, VersionedOpG, WindowedStore, causal_maxima, sign_versioned_op,
     signing_key_from_seed, verify_signed_op_in,
 };
 
@@ -183,9 +183,8 @@ impl OpLanguage for WinLang {
                 .map(|(del_entry, _, _)| *del_entry)
                 .collect();
 
-            let survives = |add: &EntryHash| {
-                !effective_removes.iter().any(|r| ctx.is_ancestor(add, r))
-            };
+            let survives =
+                |add: &EntryHash| !effective_removes.iter().any(|r| ctx.is_ancestor(add, r));
             let mut surviving: BTreeSet<EntryHash> = BTreeSet::new();
             if survives(put_entry) {
                 surviving.insert(*put_entry);
@@ -347,7 +346,11 @@ impl Rng {
         z ^ (z >> 31)
     }
     fn upto(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next() % n as u64) as usize }
+        if n == 0 {
+            0
+        } else {
+            (self.next() % n as u64) as usize
+        }
     }
     fn pct(&mut self, p: u64) -> bool {
         self.next() % 100 < p
@@ -388,17 +391,27 @@ impl Author {
             VersionedOpG::<WinLang>::current_for_topic(op, ts, TOPIC).observing(observed);
         let (signed, advanced) = sign_versioned_op(&self.key, &self.head, versioned);
         self.head = advanced;
-        let id = verify_signed_op_in::<WinLang>(&signed).expect("verifies").hash();
+        let id = verify_signed_op_in::<WinLang>(&signed)
+            .expect("verifies")
+            .hash();
         (signed, id)
     }
     /// Sign from an explicit (stale) head WITHOUT advancing — a forked-log op sharing
     /// a seq/backlink with the op that really advanced the head (equivocation, which
     /// verification admits: ops.rs:626-630). Distinct content ⇒ distinct hash.
-    fn fork(&self, head: LogHead, ts: u64, observed: Vec<[u8; 32]>, op: WinOp) -> (SignedOp, [u8; 32]) {
+    fn fork(
+        &self,
+        head: LogHead,
+        ts: u64,
+        observed: Vec<[u8; 32]>,
+        op: WinOp,
+    ) -> (SignedOp, [u8; 32]) {
         let versioned =
             VersionedOpG::<WinLang>::current_for_topic(op, ts, TOPIC).observing(observed);
         let (signed, _adv) = sign_versioned_op(&self.key, &head, versioned);
-        let id = verify_signed_op_in::<WinLang>(&signed).expect("verifies").hash();
+        let id = verify_signed_op_in::<WinLang>(&signed)
+            .expect("verifies")
+            .hash();
         (signed, id)
     }
 }
@@ -446,13 +459,28 @@ fn build_history(seed: u64, authors: usize, steps: usize) -> Vec<SignedOp> {
         }
 
         let op = match rng.upto(12) {
-            0..=2 => WinOp::Add { key: rng.upto(4) as u16 },
-            3 => WinOp::Rem { key: rng.upto(4) as u16 },
-            4 => WinOp::SetReg { slot: rng.upto(3) as u8, val: rng.upto(1000) as u32 },
-            5 => WinOp::SetLock { locked: rng.pct(50) },
-            6 => WinOp::Put { emoji: rng.upto(4) as u8, pos: rng.upto(88) as u32 },
+            0..=2 => WinOp::Add {
+                key: rng.upto(4) as u16,
+            },
+            3 => WinOp::Rem {
+                key: rng.upto(4) as u16,
+            },
+            4 => WinOp::SetReg {
+                slot: rng.upto(3) as u8,
+                val: rng.upto(1000) as u32,
+            },
+            5 => WinOp::SetLock {
+                locked: rng.pct(50),
+            },
+            6 => WinOp::Put {
+                emoji: rng.upto(4) as u8,
+                pos: rng.upto(88) as u32,
+            },
             7 => match pick(&put_ids, &mut rng) {
-                Some(obj) => WinOp::Move { obj, pos: rng.upto(88) as u32 },
+                Some(obj) => WinOp::Move {
+                    obj,
+                    pos: rng.upto(88) as u32,
+                },
                 None => WinOp::Add { key: 0 },
             },
             8 | 9 => match pick(&put_ids, &mut rng) {
@@ -478,9 +506,10 @@ fn build_history(seed: u64, authors: usize, steps: usize) -> Vec<SignedOp> {
         // Equivocation: ~1-in-13 steps, the same author ALSO signs a forked op from
         // the pre-advance head — a genuine antichain of per-author maxima (§2.5-A3).
         if rng.pct(8) {
-            let fork_op = WinOp::Add { key: rng.upto(4) as u16 };
-            let (fsigned, fid) =
-                peers[author].fork(head_before, ts + 500, observed, fork_op);
+            let fork_op = WinOp::Add {
+                key: rng.upto(4) as u16,
+            };
+            let (fsigned, fid) = peers[author].fork(head_before, ts + 500, observed, fork_op);
             op_hashes.push(fid);
             out.push(fsigned);
         }
@@ -524,19 +553,42 @@ fn ingest_windowed(cap: usize, ops: &[SignedOp]) -> WindowedStore<WinLang> {
 /// identity of `state_root` / entry-set / `sync_root` between a windowed store and a
 /// full store fed the same ops with `N ≤ W` (window complete).
 fn assert_view_equiv(windowed: &WindowedStore<WinLang>, full: &Store<WinLang>, label: &str) {
-    assert!(windowed.is_complete(), "{label}: window must be complete (N <= W)");
-    assert_eq!(windowed.pending_len(), 0, "{label}: windowed liveness (pending == 0)");
-    assert_eq!(full.pending_len(), 0, "{label}: full liveness (pending == 0)");
+    assert!(
+        windowed.is_complete(),
+        "{label}: window must be complete (N <= W)"
+    );
+    assert_eq!(
+        windowed.pending_len(),
+        0,
+        "{label}: windowed liveness (pending == 0)"
+    );
+    assert_eq!(
+        full.pending_len(),
+        0,
+        "{label}: full liveness (pending == 0)"
+    );
 
     // The retained set equals the full set while N <= W.
-    assert_eq!(windowed.entry_hashes(), full.entry_hashes(), "{label}: retained set == full set");
+    assert_eq!(
+        windowed.entry_hashes(),
+        full.entry_hashes(),
+        "{label}: retained set == full set"
+    );
 
     // View triple-equality: windowed bitset == full cheap Reach == kernel ReachIndex.
     let wv = windowed.view();
     let fv = full.view();
     assert_eq!(wv, fv, "{label}: windowed.view() != full.view()");
-    assert_eq!(fv, full.view_reference(), "{label}: full.view() != full.view_reference() (kernel oracle)");
-    assert_eq!(wv, windowed.view_reference(), "{label}: windowed.view() != windowed.view_reference()");
+    assert_eq!(
+        fv,
+        full.view_reference(),
+        "{label}: full.view() != full.view_reference() (kernel oracle)"
+    );
+    assert_eq!(
+        wv,
+        windowed.view_reference(),
+        "{label}: windowed.view() != windowed.view_reference()"
+    );
 
     // state_root survives windowing intact (§4.3).
     assert_eq!(
@@ -546,7 +598,11 @@ fn assert_view_equiv(windowed: &WindowedStore<WinLang>, full: &Store<WinLang>, l
     );
 
     // Cut-scoped sync_root over the retained set == full sync_root (identical set).
-    assert_eq!(windowed.sync_root(), full.sync_root(), "{label}: sync_root mismatch");
+    assert_eq!(
+        windowed.sync_root(),
+        full.sync_root(),
+        "{label}: sync_root mismatch"
+    );
 }
 
 /// The expensive half: the bitset `is_ancestor` ≡ kernel `ReachIndex::is_ancestor`
@@ -595,8 +651,16 @@ fn windowed_equiv_matches_full_history() {
             let windowed_a = ingest_windowed(w1, &arrival);
             let windowed_b = ingest_windowed(w2, &shuffled(&ops, seed ^ order_seed ^ 0xABCD));
 
-            assert_view_equiv(&windowed_a, &full, &format!("seed {seed} W={w1} order {order_seed}"));
-            assert_view_equiv(&windowed_b, &full, &format!("seed {seed} W={w2} order {order_seed}"));
+            assert_view_equiv(
+                &windowed_a,
+                &full,
+                &format!("seed {seed} W={w1} order {order_seed}"),
+            );
+            assert_view_equiv(
+                &windowed_b,
+                &full,
+                &format!("seed {seed} W={w2} order {order_seed}"),
+            );
 
             // §4.1 — different W, different shuffles, SAME op-set ⇒ equal views.
             assert_eq!(
@@ -608,8 +672,16 @@ fn windowed_equiv_matches_full_history() {
             // ops_root over the retained set == full ops_root (identical set, §4.3).
             #[cfg(feature = "merkle")]
             {
-                assert_eq!(windowed_a.ops_root(), full.ops_root(), "seed {seed}: windowed ops_root != full");
-                assert_eq!(windowed_b.ops_root(), full.ops_root(), "seed {seed}: windowed ops_root != full");
+                assert_eq!(
+                    windowed_a.ops_root(),
+                    full.ops_root(),
+                    "seed {seed}: windowed ops_root != full"
+                );
+                assert_eq!(
+                    windowed_b.ops_root(),
+                    full.ops_root(),
+                    "seed {seed}: windowed ops_root != full"
+                );
             }
             view_checks += 1;
 
@@ -617,11 +689,7 @@ fn windowed_equiv_matches_full_history() {
             // the first arrival order) — every adversarial DAG gets its full pairwise
             // audit; the small targeted vectors below add more, cheaply.
             if order_idx == 0 {
-                assert_reach_equiv(
-                    &windowed_a,
-                    &full,
-                    &format!("seed {seed} W={w1} pairwise"),
-                );
+                assert_reach_equiv(&windowed_a, &full, &format!("seed {seed} W={w1} pairwise"));
                 reach_checks += 1;
             }
         }
@@ -648,11 +716,17 @@ fn different_windows_converge() {
         assert_eq!(a.pending_len(), 0);
         assert_eq!(b.pending_len(), 0);
         assert!(a.is_complete() && b.is_complete());
-        assert_eq!(a.view(), b.view(), "seed {seed}: different-W windows diverged");
+        assert_eq!(
+            a.view(),
+            b.view(),
+            "seed {seed}: different-W windows diverged"
+        );
         assert_eq!(a.entry_hashes(), b.entry_hashes());
         cases += 1;
     }
-    println!("PASS different_windows_converge: {cases} seeds, different-W replicas converge (§4.1)");
+    println!(
+        "PASS different_windows_converge: {cases} seeds, different-W replicas converge (§4.1)"
+    );
 }
 
 // ===========================================================================
@@ -677,7 +751,13 @@ fn old_add_killed_by_later_remove_in_window() {
     // 40 unrelated ops widen the span between the add and its remove.
     let mut hashes = vec![add_id];
     for i in 0..40u64 {
-        let (o, h) = a.sign(TS_BASE + 10 + i, vec![], WinOp::Add { key: (i % 3) as u16 });
+        let (o, h) = a.sign(
+            TS_BASE + 10 + i,
+            vec![],
+            WinOp::Add {
+                key: (i % 3) as u16,
+            },
+        );
         hashes.push(h);
         ops.push(o);
     }
@@ -689,8 +769,14 @@ fn old_add_killed_by_later_remove_in_window() {
     let windowed = ingest_windowed(ops.len() + 5, &ops);
     assert_windowed_equiv(&windowed, &full, "old_add_killed_by_later_remove");
     // The add-wins survivor keeps key 9 live (B's concurrent add was never observed).
-    assert!(windowed.view().live_keys.contains(&9), "add-wins survivor keeps key 9 live");
-    assert_eq!(windowed.view().key_authors[&9], BTreeSet::from([b.author_id()]));
+    assert!(
+        windowed.view().live_keys.contains(&9),
+        "add-wins survivor keeps key 9 live"
+    );
+    assert_eq!(
+        windowed.view().key_authors[&9],
+        BTreeSet::from([b.author_id()])
+    );
     println!("PASS targeted: old add killed by a later remove, both in-window; windowed == full");
 }
 
@@ -708,18 +794,33 @@ fn killed_object_resurrected_by_later_undel_in_window() {
     ops.push(del);
     // A long span.
     for i in 0..30u64 {
-        let (o, _h) = a.sign(TS_BASE + 10 + i, vec![], WinOp::Add { key: (i % 3) as u16 });
+        let (o, _h) = a.sign(
+            TS_BASE + 10 + i,
+            vec![],
+            WinOp::Add {
+                key: (i % 3) as u16,
+            },
+        );
         ops.push(o);
     }
     // Undel observing the early del ⇒ overrides it, resurrecting the object.
-    let (undel, _u) = a.sign(TS_BASE + 100, vec![del_id], WinOp::Undel { del: OpId(del_id) });
+    let (undel, _u) = a.sign(
+        TS_BASE + 100,
+        vec![del_id],
+        WinOp::Undel { del: OpId(del_id) },
+    );
     ops.push(undel);
 
     let full = ingest_full(&ops);
     let windowed = ingest_windowed(ops.len() + 5, &ops);
     assert_windowed_equiv(&windowed, &full, "resurrection");
-    assert!(windowed.view().objects.contains_key(&OpId(put_id)), "undel resurrects the object");
-    println!("PASS targeted: killed object resurrected by a later undel, both in-window; windowed == full");
+    assert!(
+        windowed.view().objects.contains_key(&OpId(put_id)),
+        "undel resurrects the object"
+    );
+    println!(
+        "PASS targeted: killed object resurrected by a later undel, both in-window; windowed == full"
+    );
 }
 
 /// register write read by a narrow-horizon laggard — the R′ hazard (§2.5, §8.7): a
@@ -738,19 +839,42 @@ fn narrow_horizon_lock_gate_r_prime() {
     let (lock, lock_id) = a.sign(TS_BASE + 1, vec![put_id], WinOp::SetLock { locked: true });
     ops.push(lock);
     // Move CONCURRENT with the lock (observes only the put) ⇒ still applies.
-    let (mov_concurrent, _m1) = b.sign(TS_BASE + 2, vec![put_id], WinOp::Move { obj: OpId(put_id), pos: 64 });
+    let (mov_concurrent, _m1) = b.sign(
+        TS_BASE + 2,
+        vec![put_id],
+        WinOp::Move {
+            obj: OpId(put_id),
+            pos: 64,
+        },
+    );
     ops.push(mov_concurrent);
     // Move observing the lock ⇒ suppressed.
-    let (mov_locked, _m2) = b.sign(TS_BASE + 3, vec![lock_id], WinOp::Move { obj: OpId(put_id), pos: 70 });
+    let (mov_locked, _m2) = b.sign(
+        TS_BASE + 3,
+        vec![lock_id],
+        WinOp::Move {
+            obj: OpId(put_id),
+            pos: 70,
+        },
+    );
     ops.push(mov_locked);
 
     let full = ingest_full(&ops);
     let windowed = ingest_windowed(ops.len() + 5, &ops);
     assert_windowed_equiv(&windowed, &full, "r_prime_lock_gate");
-    assert!(windowed.view().locked, "the room ends up locked (full-horizon)");
+    assert!(
+        windowed.view().locked,
+        "the room ends up locked (full-horizon)"
+    );
     // The surviving position is the concurrent move (64), never the locked move (70).
-    assert_eq!(windowed.view().objects[&OpId(put_id)].1, 64, "concurrent move applied; locked move suppressed");
-    println!("PASS targeted: R' narrow-horizon lock gate (concurrent move applies, observed move suppressed); windowed == full");
+    assert_eq!(
+        windowed.view().objects[&OpId(put_id)].1,
+        64,
+        "concurrent move applied; locked move suppressed"
+    );
+    println!(
+        "PASS targeted: R' narrow-horizon lock gate (concurrent move applies, observed move suppressed); windowed == full"
+    );
 }
 
 // ===========================================================================
@@ -766,10 +890,23 @@ fn fence_n_gt_w_is_incomplete_bounded_and_yields_no_view() {
     let cap = 8;
     let windowed = ingest_windowed(cap, &ops);
 
-    assert!(ops.len() > cap, "the history must exceed the window to trip the fence");
-    assert!(!windowed.is_complete(), "window past W must report incomplete");
-    assert!(windowed.len() <= cap, "window stays bounded at W (len={}, cap={cap})", windowed.len());
-    assert!(windowed.try_view().is_none(), "fence: no view over a truncated window");
+    assert!(
+        ops.len() > cap,
+        "the history must exceed the window to trip the fence"
+    );
+    assert!(
+        !windowed.is_complete(),
+        "window past W must report incomplete"
+    );
+    assert!(
+        windowed.len() <= cap,
+        "window stays bounded at W (len={}, cap={cap})",
+        windowed.len()
+    );
+    assert!(
+        windowed.try_view().is_none(),
+        "fence: no view over a truncated window"
+    );
     assert!(
         windowed.appended_since(GrowthEpoch::INITIAL).is_none(),
         "appended_since past the window boundary is None (dag.rs:228-235)"
@@ -851,7 +988,10 @@ fn run_compacting_replica(
     let arrival = shuffled(ops, order_seed);
     let mut full = Store::new();
     let mut windowed = WindowedStore::with_window(window);
-    assert!(windowed.is_compacting(), "with_window must enable compaction");
+    assert!(
+        windowed.is_compacting(),
+        "with_window must enable compaction"
+    );
     let mut comp_rng = Rng::new(comp_seed);
 
     for (i, signed) in arrival.iter().enumerate() {
@@ -871,12 +1011,18 @@ fn run_compacting_replica(
             full.pending_len(),
             "{label} step {i}: pending diverged (lift must be identical)"
         );
-        assert!(windowed.is_answerable(), "{label} step {i}: compacted store must be answerable");
+        assert!(
+            windowed.is_answerable(),
+            "{label} step {i}: compacted store must be answerable"
+        );
 
         // The core assertion: compaction never changes the view (§2.6).
         let wv = windowed.view();
         let fv = full.view();
-        assert_eq!(wv, fv, "{label} step {i}: compacted windowed.view() != full.view() (N>>W)");
+        assert_eq!(
+            wv, fv,
+            "{label} step {i}: compacted windowed.view() != full.view() (N>>W)"
+        );
         assert_eq!(
             win_state_root(&wv),
             win_state_root(&fv),
@@ -886,17 +1032,33 @@ fn run_compacting_replica(
         // Periodic root-of-trust: the full view equals the kernel ReachIndex oracle,
         // and the frozen summary matches the kernel across the cut.
         if i % 37 == 0 {
-            assert_eq!(fv, full.view_reference(), "{label} step {i}: full.view() != kernel ReachIndex oracle");
+            assert_eq!(
+                fv,
+                full.view_reference(),
+                "{label} step {i}: full.view() != kernel ReachIndex oracle"
+            );
             assert_compacted_reach_equiv(&windowed, &full, &format!("{label} step {i}"));
         }
         stats.steps += 1;
     }
 
-    assert_eq!(windowed.pending_len(), 0, "{label}: quiescent (pending == 0)");
+    assert_eq!(
+        windowed.pending_len(),
+        0,
+        "{label}: quiescent (pending == 0)"
+    );
     assert_eq!(full.pending_len(), 0, "{label}: full quiescent");
     // Final full audit: view triple-equality + boundary oracle over the retained set.
-    assert_eq!(windowed.view(), full.view(), "{label}: final compacted view != full");
-    assert_eq!(full.view(), full.view_reference(), "{label}: final full view != kernel oracle");
+    assert_eq!(
+        windowed.view(),
+        full.view(),
+        "{label}: final compacted view != full"
+    );
+    assert_eq!(
+        full.view(),
+        full.view_reference(),
+        "{label}: final full view != kernel oracle"
+    );
     assert_compacted_reach_equiv(&windowed, &full, &format!("{label} final"));
     (windowed, full)
 }
@@ -960,7 +1122,10 @@ fn windowed_compacts_beyond_window_matches_full() {
         stats.discarded += wa.total_discarded() + wb.total_discarded();
     }
 
-    assert!(stats.discarded > 0, "compaction must discard monotone-shadowed ops");
+    assert!(
+        stats.discarded > 0,
+        "compaction must discard monotone-shadowed ops"
+    );
     println!(
         "PASS windowed compaction N>>W: {} per-step (windowed.view()==full.view() + state_root) checks; \
          {} compaction events discarded {} monotone-shadowed ops total (auto + adversarial cuts); \
@@ -995,7 +1160,17 @@ fn remove_straddling_the_cut_compacted() {
     // A long span forces auto-compaction with a small window, so A's add is retained
     // ACROSS a cut before the remove arrives.
     for i in 0..30u64 {
-        pre.push(a.sign(TS_BASE + 10 + i, vec![], WinOp::SetReg { slot: (i % 3) as u8, val: i as u32 }).0);
+        pre.push(
+            a.sign(
+                TS_BASE + 10 + i,
+                vec![],
+                WinOp::SetReg {
+                    slot: (i % 3) as u8,
+                    val: i as u32,
+                },
+            )
+            .0,
+        );
     }
     let (rem, _r) = a.sign(TS_BASE + 100, vec![add_id], WinOp::Rem { key: 9 });
 
@@ -1006,22 +1181,45 @@ fn remove_straddling_the_cut_compacted() {
         windowed.ingest_verified(verified(signed));
     }
     windowed.compact();
-    assert_eq!(windowed.view(), full.view(), "pre-remove: compacted view != full");
-    assert!(windowed.view().live_keys.contains(&9), "key 9 live before the remove");
+    assert_eq!(
+        windowed.view(),
+        full.view(),
+        "pre-remove: compacted view != full"
+    );
+    assert!(
+        windowed.view().live_keys.contains(&9),
+        "key 9 live before the remove"
+    );
     // A's add is still retained here (a surviving per-author maximum), so the remove
     // that arrives next genuinely straddles the cut.
     let add_entry = windowed.lifted_entry(OpId(add_id)).expect("add bound");
-    assert!(windowed.entry_hashes().contains(&add_entry), "A's add retained across the first cut");
+    assert!(
+        windowed.entry_hashes().contains(&add_entry),
+        "A's add retained across the first cut"
+    );
 
     full.ingest_verified(verified(&rem));
     windowed.ingest_verified(verified(&rem));
     let report = windowed.compact();
-    assert!(report.discarded >= 1, "the killed add + remove are discarded at the straddling cut");
-    assert!(!windowed.entry_hashes().contains(&add_entry), "the killed add is now compacted away");
+    assert!(
+        report.discarded >= 1,
+        "the killed add + remove are discarded at the straddling cut"
+    );
+    assert!(
+        !windowed.entry_hashes().contains(&add_entry),
+        "the killed add is now compacted away"
+    );
 
-    assert_eq!(windowed.view(), full.view(), "post-remove: view != full (remove straddling the cut)");
+    assert_eq!(
+        windowed.view(),
+        full.view(),
+        "post-remove: view != full (remove straddling the cut)"
+    );
     assert_eq!(full.view(), full.view_reference(), "kernel oracle");
-    assert!(windowed.view().live_keys.contains(&9), "add-wins survivor keeps key 9 live");
+    assert!(
+        windowed.view().live_keys.contains(&9),
+        "add-wins survivor keeps key 9 live"
+    );
     assert_eq!(
         windowed.view().key_authors[&9],
         BTreeSet::from([b.author_id()]),
@@ -1048,9 +1246,22 @@ fn resurrection_across_the_cut_compacted() {
     let (del, del_id) = a.sign(TS_BASE + 1, vec![put_id], WinOp::Del { obj: OpId(put_id) });
     pre.push(del);
     for i in 0..30u64 {
-        pre.push(a.sign(TS_BASE + 10 + i, vec![], WinOp::Add { key: (i % 4) as u16 }).0);
+        pre.push(
+            a.sign(
+                TS_BASE + 10 + i,
+                vec![],
+                WinOp::Add {
+                    key: (i % 4) as u16,
+                },
+            )
+            .0,
+        );
     }
-    let (undel, _u) = a.sign(TS_BASE + 100, vec![del_id], WinOp::Undel { del: OpId(del_id) });
+    let (undel, _u) = a.sign(
+        TS_BASE + 100,
+        vec![del_id],
+        WinOp::Undel { del: OpId(del_id) },
+    );
 
     let mut full = Store::new();
     let mut windowed = WindowedStore::with_window(6);
@@ -1060,17 +1271,30 @@ fn resurrection_across_the_cut_compacted() {
     }
     windowed.compact();
     assert_eq!(windowed.view(), full.view(), "pre-undel: view != full");
-    assert!(!windowed.view().objects.contains_key(&OpId(put_id)), "object deleted pre-undel");
+    assert!(
+        !windowed.view().objects.contains_key(&OpId(put_id)),
+        "object deleted pre-undel"
+    );
     // The put and del are retained wholesale (pieces are never compacted).
     let put_entry = windowed.lifted_entry(OpId(put_id)).expect("put bound");
     let del_entry = windowed.lifted_entry(OpId(del_id)).expect("del bound");
-    assert!(windowed.entry_hashes().contains(&put_entry), "put RETAINED across the cut");
-    assert!(windowed.entry_hashes().contains(&del_entry), "del RETAINED across the cut");
+    assert!(
+        windowed.entry_hashes().contains(&put_entry),
+        "put RETAINED across the cut"
+    );
+    assert!(
+        windowed.entry_hashes().contains(&del_entry),
+        "del RETAINED across the cut"
+    );
 
     full.ingest_verified(verified(&undel));
     windowed.ingest_verified(verified(&undel));
     windowed.compact();
-    assert_eq!(windowed.view(), full.view(), "resurrection across the cut: windowed != full");
+    assert_eq!(
+        windowed.view(),
+        full.view(),
+        "resurrection across the cut: windowed != full"
+    );
     assert_eq!(full.view(), full.view_reference(), "kernel oracle");
     assert!(
         windowed.view().objects.contains_key(&OpId(put_id)),
@@ -1097,13 +1321,37 @@ fn r_prime_lock_gate_across_the_cut_compacted() {
     let (lock, lock_id) = a.sign(TS_BASE + 1, vec![put_id], WinOp::SetLock { locked: true });
     pre.push(lock);
     // Concurrent-with-lock (observes only the put) ⇒ applies.
-    let (mov_concurrent, _m1) = b.sign(TS_BASE + 2, vec![put_id], WinOp::Move { obj: OpId(put_id), pos: 64 });
+    let (mov_concurrent, _m1) = b.sign(
+        TS_BASE + 2,
+        vec![put_id],
+        WinOp::Move {
+            obj: OpId(put_id),
+            pos: 64,
+        },
+    );
     pre.push(mov_concurrent);
     // Observes the lock ⇒ suppressed.
-    let (mov_locked, _m2) = b.sign(TS_BASE + 3, vec![lock_id], WinOp::Move { obj: OpId(put_id), pos: 70 });
+    let (mov_locked, _m2) = b.sign(
+        TS_BASE + 3,
+        vec![lock_id],
+        WinOp::Move {
+            obj: OpId(put_id),
+            pos: 70,
+        },
+    );
     pre.push(mov_locked);
     for i in 0..30u64 {
-        pre.push(a.sign(TS_BASE + 10 + i, vec![], WinOp::SetReg { slot: 0, val: i as u32 }).0);
+        pre.push(
+            a.sign(
+                TS_BASE + 10 + i,
+                vec![],
+                WinOp::SetReg {
+                    slot: 0,
+                    val: i as u32,
+                },
+            )
+            .0,
+        );
     }
 
     let mut full = Store::new();
@@ -1114,9 +1362,16 @@ fn r_prime_lock_gate_across_the_cut_compacted() {
     }
     windowed.compact();
 
-    assert_eq!(windowed.view(), full.view(), "R′ across the cut: windowed != full");
+    assert_eq!(
+        windowed.view(),
+        full.view(),
+        "R′ across the cut: windowed != full"
+    );
     assert_eq!(full.view(), full.view_reference(), "kernel oracle");
-    assert!(windowed.view().locked, "room ends up locked (full-horizon read)");
+    assert!(
+        windowed.view().locked,
+        "room ends up locked (full-horizon read)"
+    );
     assert_eq!(
         windowed.view().objects[&OpId(put_id)].1,
         64,
@@ -1150,8 +1405,14 @@ fn compact_twice_is_idempotent_and_conservative() {
     let second = windowed.compact(); // no new ops
     let v2 = windowed.view();
 
-    assert!(first.discarded > 0, "the first compaction must discard the monotone-shadowed ops");
-    assert_eq!(v0, v1, "compaction changed the view (conservative-retention violated)");
+    assert!(
+        first.discarded > 0,
+        "the first compaction must discard the monotone-shadowed ops"
+    );
+    assert_eq!(
+        v0, v1,
+        "compaction changed the view (conservative-retention violated)"
+    );
     assert_eq!(v1, v2, "second compaction changed the view");
     assert_eq!(
         second.discarded, 0,
@@ -1218,9 +1479,16 @@ fn build_bounded_history(seed: u64, authors: usize, steps: usize) -> Vec<SignedO
         }
 
         let op = match rng.upto(6) {
-            0..=2 => WinOp::Add { key: rng.upto(KEYS) as u16 },
-            3 => WinOp::Rem { key: rng.upto(KEYS) as u16 },
-            _ => WinOp::SetReg { slot: rng.upto(SLOTS) as u8, val: rng.upto(1000) as u32 },
+            0..=2 => WinOp::Add {
+                key: rng.upto(KEYS) as u16,
+            },
+            3 => WinOp::Rem {
+                key: rng.upto(KEYS) as u16,
+            },
+            _ => WinOp::SetReg {
+                slot: rng.upto(SLOTS) as u8,
+                val: rng.upto(1000) as u32,
+            },
         };
         let (signed, id) = peers[author].sign(ts, observed, op);
         op_hashes.push(id);
@@ -1268,10 +1536,7 @@ fn packed_summary_is_bounded_independent_of_n() {
         // One admission at a time, re-enumerating between rounds: resolving one
         // deferral caches its prev's row as most-recent, which can lift OTHER
         // deferred ops in the same drain and retire their candidates.
-        loop {
-            let Some(d) = w.retry_pending().courier.into_iter().next() else {
-                break;
-            };
+        while let Some(d) = w.retry_pending().courier.into_iter().next() {
             let ctx = w.courier_context().expect("compaction profile");
             let mut answers: HashMap<EntryHash, CourierAnswer> = HashMap::new();
             for prev in &d.missing {
@@ -1366,7 +1631,9 @@ fn packed_summary_is_bounded_independent_of_n() {
         last.2
     );
 
-    println!("PASS packed_summary_is_bounded — M3.2 memory bound (§3.2 cut-contact / §3.3 in-window / §3.4 residue matrix):");
+    println!(
+        "PASS packed_summary_is_bounded — M3.2 memory bound (§3.2 cut-contact / §3.3 in-window / §3.4 residue matrix):"
+    );
     println!(
         "   N   | M3.2 summary rows | M3.2 summary bytes | courier gap (discarded rows, O(N)) | M3.1 anc pairs Θ(N²) | M3.1 anc bytes"
     );
@@ -1379,9 +1646,16 @@ fn packed_summary_is_bounded_independent_of_n() {
     println!(
         "  => M3.2 packed summary FLAT in N ({}B @ N={} -> {}B @ N={}, {} rows -> {} rows) while N grew {}x; \
          M3.1 exact `anc` grew {}x ({} -> {} ancestor-pairs). Headline: Θ(N²) -> O(W+|R|²).",
-        first.2, first.0, last.2, last.0, first.1, last.1,
+        first.2,
+        first.0,
+        last.2,
+        last.0,
+        first.1,
+        last.1,
         last.0 / first.0.max(1),
-        last.4 / first.4.max(1), first.4, last.4
+        last.4 / first.4.max(1),
+        first.4,
+        last.4
     );
 }
 
@@ -1400,8 +1674,7 @@ fn packed_summary_is_bounded_independent_of_n() {
 use std::collections::HashMap;
 
 use tutti_core::{
-    Courier, CourierAnswer, CourierFault, DeferredLiftError, Digest, DiscardBatchSeq,
-    DiscardProof,
+    Courier, CourierAnswer, CourierFault, DeferredLiftError, Digest, DiscardBatchSeq, DiscardProof,
 };
 
 /// A map-backed §4.5 courier: answers gathered ahead of the lift call.
@@ -1504,7 +1777,10 @@ fn laggard_fixture() -> LaggardFixture {
     let stats = leaf.compact();
     assert_eq!(stats.discarded, 2, "add + consumed remove discard");
     assert_eq!(leaf.courier_gap_entries(), 1, "reach cap 1 enforced");
-    assert!(leaf.lifted_entry(OpId(p_id)).is_some(), "binding survives discard");
+    assert!(
+        leaf.lifted_entry(OpId(p_id)).is_some(),
+        "binding survives discard"
+    );
 
     // Offline B saw P before the cut and now writes the deep laggard.
     let (x_signed, x_id) = b.sign(TS_BASE + 10, vec![p_id], WinOp::Add { key: 7 });
@@ -1527,7 +1803,10 @@ fn genuine_answer(fx: &LaggardFixture) -> CourierAnswer {
         .leaf
         .prove_discarded_at(&fx.p_entry, root)
         .expect("P's batch is retained in the journal");
-    assert!(proof.verifies(&fx.p_entry, &root), "journal proof must verify");
+    assert!(
+        proof.verifies(&fx.p_entry, &root),
+        "journal proof must verify"
+    );
     let reach = fx.full.reach();
     let ancestors: BTreeSet<EntryHash> = fx
         .full
@@ -1542,7 +1821,11 @@ fn genuine_answer(fx: &LaggardFixture) -> CourierAnswer {
 fn compaction_journals_the_discard_batch_and_proves_members() {
     let fx = laggard_fixture();
     let root = fx.leaf.discard_root().expect("compaction profile");
-    assert_ne!(root, Digest([0u8; 32]), "a discarding compaction pins a root");
+    assert_ne!(
+        root,
+        Digest([0u8; 32]),
+        "a discarding compaction pins a root"
+    );
 
     // Exactly one batch, holding exactly the discarded set.
     let batches: Vec<_> = fx.leaf.discard_batches().collect();
@@ -1554,13 +1837,23 @@ fn compaction_journals_the_discard_batch_and_proves_members() {
     assert_eq!(fx.leaf.next_discard_batch(), DiscardBatchSeq(1));
 
     // Membership proves against the chained root — and against nothing else.
-    let proof = fx.leaf.prove_discarded_at(&fx.p_entry, root).expect("provable");
+    let proof = fx
+        .leaf
+        .prove_discarded_at(&fx.p_entry, root)
+        .expect("provable");
     assert!(proof.verifies(&fx.p_entry, &root));
     assert!(
-        fx.leaf.prove_discarded_at(&fx.p_entry, Digest([9u8; 32])).is_none(),
+        fx.leaf
+            .prove_discarded_at(&fx.p_entry, Digest([9u8; 32]))
+            .is_none(),
         "a root mismatch must refuse"
     );
-    let retained = *fx.leaf.entry_hashes().iter().next().expect("residue retained");
+    let retained = *fx
+        .leaf
+        .entry_hashes()
+        .iter()
+        .next()
+        .expect("residue retained");
     assert!(
         fx.leaf.prove_discarded_at(&retained, root).is_none(),
         "a retained (never-discarded) member must refuse"
@@ -1578,7 +1871,11 @@ fn discard_journal_evicts_whole_batches_and_reanchors_the_chain() {
     let mut batch_first_entry: Vec<EntryHash> = Vec::new();
     for key in 0..3u16 {
         let (add, add_id) = a.sign(TS_BASE + u64::from(key) * 10, vec![], WinOp::Add { key });
-        let (rem, _) = a.sign(TS_BASE + u64::from(key) * 10 + 1, vec![add_id], WinOp::Rem { key });
+        let (rem, _) = a.sign(
+            TS_BASE + u64::from(key) * 10 + 1,
+            vec![add_id],
+            WinOp::Rem { key },
+        );
         leaf.ingest_verified(verified(&add));
         let add_entry = leaf.lifted_entry(OpId(add_id)).expect("lifted");
         leaf.ingest_verified(verified(&rem));
@@ -1591,12 +1888,21 @@ fn discard_journal_evicts_whole_batches_and_reanchors_the_chain() {
     // Batches 0 and 1 aged out whole; batch 2 is retained and provable.
     assert_eq!(leaf.oldest_discard_batch(), Some(DiscardBatchSeq(2)));
     assert_eq!(leaf.next_discard_batch(), DiscardBatchSeq(3));
-    assert!(leaf.prove_discarded_at(&batch_first_entry[0], root).is_none());
-    assert!(leaf.prove_discarded_at(&batch_first_entry[1], root).is_none());
+    assert!(
+        leaf.prove_discarded_at(&batch_first_entry[0], root)
+            .is_none()
+    );
+    assert!(
+        leaf.prove_discarded_at(&batch_first_entry[1], root)
+            .is_none()
+    );
     let proof = leaf
         .prove_discarded_at(&batch_first_entry[2], root)
         .expect("newest batch stays provable past older evictions");
-    assert!(proof.verifies(&batch_first_entry[2], &root), "chain re-anchors");
+    assert!(
+        proof.verifies(&batch_first_entry[2], &root),
+        "chain re-anchors"
+    );
 }
 
 #[test]
@@ -1622,7 +1928,11 @@ fn an_oversized_batch_clears_the_journal_but_later_batches_prove() {
         "an oversized batch is itself unprovable"
     );
     assert!(leaf.oldest_discard_batch().is_none(), "journal cleared");
-    assert_eq!(leaf.next_discard_batch(), DiscardBatchSeq(1), "seq still consumed");
+    assert_eq!(
+        leaf.next_discard_batch(),
+        DiscardBatchSeq(1),
+        "seq still consumed"
+    );
 
     // A later normal-sized batch re-anchors on the post-oversize chain value.
     let (add3, add3_id) = a.sign(TS_BASE + 10, vec![], WinOp::Add { key: 1 });
@@ -1671,7 +1981,11 @@ fn a_deep_laggard_defers_and_a_real_courier_answer_admits_it() {
         fx.full.lifted_entry(fx.x_id),
         "byte-compatible admission: both sides derive the same entry hash"
     );
-    assert_eq!(fx.leaf.view(), fx.full.view(), "full-reference view equivalence");
+    assert_eq!(
+        fx.leaf.view(),
+        fx.full.view(),
+        "full-reference view equivalence"
+    );
     assert_eq!(
         win_state_root(&fx.leaf.view()),
         win_state_root(&fx.full.view()),
@@ -1730,7 +2044,11 @@ fn a_forged_proof_or_stale_context_leaves_the_laggard_deferred() {
         matches!(result, Err(DeferredLiftError::StaleContext)),
         "an out-of-date context must be rejected before the floor, got {result:?}"
     );
-    assert_eq!(fx.leaf.pending_len(), 1, "still parked; re-request under fresh context");
+    assert_eq!(
+        fx.leaf.pending_len(),
+        1,
+        "still parked; re-request under fresh context"
+    );
 
     // And under the CURRENT context the same genuine answer admits.
     let fresh_context = fx.leaf.courier_context().expect("compaction profile");

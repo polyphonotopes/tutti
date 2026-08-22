@@ -204,10 +204,10 @@ impl OpLanguage for ChannelLang {
         // 1. Resolve each channel's immutable policy (causal-maxima register).
         let mut policy: BTreeMap<ChannelId, BTreeSet<AuthorId>> = BTreeMap::new();
         for (channel, candidates) in &opens {
-            if let Some(winner) = ctx.resolve(candidates) {
-                if let ChannelOp::OpenChannel { adders, .. } = ctx.decoded()[&winner].op() {
-                    policy.insert(channel.clone(), adders.clone());
-                }
+            if let Some(winner) = ctx.resolve(candidates)
+                && let ChannelOp::OpenChannel { adders, .. } = ctx.decoded()[&winner].op()
+            {
+                policy.insert(channel.clone(), adders.clone());
             }
         }
 
@@ -248,7 +248,9 @@ impl OpLanguage for ChannelLang {
                 .iter()
                 .any(|a| !rem_entries.iter().any(|r| ctx.is_ancestor(a, r)));
             if survives {
-                view.get_mut(channel).expect("opened channel seeded").insert(*pc);
+                view.get_mut(channel)
+                    .expect("opened channel seeded")
+                    .insert(*pc);
             }
         }
 
@@ -337,14 +339,24 @@ fn capability_enforced_add_gate() {
     // --- (a) SOLE unauthorized add is inert. ---
     {
         let mut s: Store<ChannelLang> = Store::new();
-        s.commit(&founder, TOPIC, TS_BASE, ChannelOp::OpenChannel {
-            channel: ch("score"),
-            adders: adders.clone(),
-        });
-        s.commit(&evil, TOPIC, TS_BASE + 1, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 7,
-        });
+        s.commit(
+            &founder,
+            TOPIC,
+            TS_BASE,
+            ChannelOp::OpenChannel {
+                channel: ch("score"),
+                adders: adders.clone(),
+            },
+        );
+        s.commit(
+            &evil,
+            TOPIC,
+            TS_BASE + 1,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 7,
+            },
+        );
         assert!(
             !s.view()[&ch("score")].contains(&7),
             "an unauthorized SOLE add must be inert",
@@ -355,14 +367,24 @@ fn capability_enforced_add_gate() {
     // --- (b) the SAME op by an authorized author is live. ---
     {
         let mut s: Store<ChannelLang> = Store::new();
-        s.commit(&founder, TOPIC, TS_BASE, ChannelOp::OpenChannel {
-            channel: ch("score"),
-            adders: adders.clone(),
-        });
-        s.commit(&auth, TOPIC, TS_BASE + 1, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 7,
-        });
+        s.commit(
+            &founder,
+            TOPIC,
+            TS_BASE,
+            ChannelOp::OpenChannel {
+                channel: ch("score"),
+                adders: adders.clone(),
+            },
+        );
+        s.commit(
+            &auth,
+            TOPIC,
+            TS_BASE + 1,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 7,
+            },
+        );
         assert!(
             s.view()[&ch("score")].contains(&7),
             "an authorized add must be live",
@@ -375,22 +397,42 @@ fn capability_enforced_add_gate() {
     // revive pc 7. With the filter it is inert ⇒ pc 7 stays dead.
     {
         let mut s: Store<ChannelLang> = Store::new();
-        s.commit(&founder, TOPIC, TS_BASE, ChannelOp::OpenChannel {
-            channel: ch("score"),
-            adders: adders.clone(),
-        });
-        s.commit(&auth, TOPIC, TS_BASE + 1, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 7,
-        });
-        s.commit(&auth, TOPIC, TS_BASE + 2, ChannelOp::RemoveDegree {
-            channel: ch("score"),
-            pc: 7,
-        });
-        s.commit(&evil, TOPIC, TS_BASE + 3, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 7,
-        });
+        s.commit(
+            &founder,
+            TOPIC,
+            TS_BASE,
+            ChannelOp::OpenChannel {
+                channel: ch("score"),
+                adders: adders.clone(),
+            },
+        );
+        s.commit(
+            &auth,
+            TOPIC,
+            TS_BASE + 1,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 7,
+            },
+        );
+        s.commit(
+            &auth,
+            TOPIC,
+            TS_BASE + 2,
+            ChannelOp::RemoveDegree {
+                channel: ch("score"),
+                pc: 7,
+            },
+        );
+        s.commit(
+            &evil,
+            TOPIC,
+            TS_BASE + 3,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 7,
+            },
+        );
         assert!(
             !s.view()[&ch("score")].contains(&7),
             "an unauthorized CAUSALLY-LATEST add must not revive the degree",
@@ -402,18 +444,33 @@ fn capability_enforced_add_gate() {
     // adders, yet the remove counts and cancels the observed authorized add.
     {
         let mut s: Store<ChannelLang> = Store::new();
-        s.commit(&founder, TOPIC, TS_BASE, ChannelOp::OpenChannel {
-            channel: ch("score"),
-            adders: adders.clone(),
-        });
-        s.commit(&auth, TOPIC, TS_BASE + 1, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 5,
-        });
-        s.commit(&evil, TOPIC, TS_BASE + 2, ChannelOp::RemoveDegree {
-            channel: ch("score"),
-            pc: 5,
-        });
+        s.commit(
+            &founder,
+            TOPIC,
+            TS_BASE,
+            ChannelOp::OpenChannel {
+                channel: ch("score"),
+                adders: adders.clone(),
+            },
+        );
+        s.commit(
+            &auth,
+            TOPIC,
+            TS_BASE + 1,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 5,
+            },
+        );
+        s.commit(
+            &evil,
+            TOPIC,
+            TS_BASE + 2,
+            ChannelOp::RemoveDegree {
+                channel: ch("score"),
+                pc: 5,
+            },
+        );
         assert!(
             !s.view()[&ch("score")].contains(&5),
             "an unauthorized (open) remove must kill an observed authorized add",
@@ -446,36 +503,66 @@ fn partition_op_sets() -> (Vec<SignedOp>, Vec<SignedOp>) {
     // Peer A's chain (self-contained: each op observes only A's frontier).
     let mut a: Store<ChannelLang> = Store::new();
     let a_ops = vec![
-        a.commit(&founder, TOPIC, TS_BASE, ChannelOp::OpenChannel {
-            channel: ch("score"),
-            adders,
-        }),
-        a.commit(&k1, TOPIC, TS_BASE + 1, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 10,
-        }),
-        a.commit(&k3, TOPIC, TS_BASE + 2, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 99, // UNAUTHORIZED
-        }),
+        a.commit(
+            &founder,
+            TOPIC,
+            TS_BASE,
+            ChannelOp::OpenChannel {
+                channel: ch("score"),
+                adders,
+            },
+        ),
+        a.commit(
+            &k1,
+            TOPIC,
+            TS_BASE + 1,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 10,
+            },
+        ),
+        a.commit(
+            &k3,
+            TOPIC,
+            TS_BASE + 2,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 99, // UNAUTHORIZED
+            },
+        ),
     ];
 
     // Peer B's chain — genuinely CONCURRENT with A (never saw A's ops), so B's
     // remove of pc 10 does NOT observe A's add ⇒ add-wins keeps 10 alive.
     let mut b: Store<ChannelLang> = Store::new();
     let b_ops = vec![
-        b.commit(&k2, TOPIC, TS_BASE + 10, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 20,
-        }),
-        b.commit(&k4, TOPIC, TS_BASE + 11, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 88, // UNAUTHORIZED
-        }),
-        b.commit(&k4, TOPIC, TS_BASE + 12, ChannelOp::RemoveDegree {
-            channel: ch("score"),
-            pc: 10, // UNAUTHORIZED remover, but concurrent with A's add ⇒ add wins
-        }),
+        b.commit(
+            &k2,
+            TOPIC,
+            TS_BASE + 10,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 20,
+            },
+        ),
+        b.commit(
+            &k4,
+            TOPIC,
+            TS_BASE + 11,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 88, // UNAUTHORIZED
+            },
+        ),
+        b.commit(
+            &k4,
+            TOPIC,
+            TS_BASE + 12,
+            ChannelOp::RemoveDegree {
+                channel: ch("score"),
+                pc: 10, // UNAUTHORIZED remover, but concurrent with A's add ⇒ add wins
+            },
+        ),
     ];
 
     (a_ops, b_ops)
@@ -533,7 +620,11 @@ fn convergence_across_peers_and_orders() {
         let mut s: Store<ChannelLang> = Store::new();
         ingest_all(&mut s, &shuffled(&all, seed));
         assert_eq!(s.pending_len(), 0, "seed {seed} left ops parked");
-        assert_eq!(s.view(), expected, "shuffle {seed} diverged from the enforced view");
+        assert_eq!(
+            s.view(),
+            expected,
+            "shuffle {seed} diverged from the enforced view"
+        );
         #[cfg(feature = "test-support")]
         assert_eq!(s.view(), s.view_reference());
         #[cfg(feature = "merkle")]
@@ -564,26 +655,49 @@ fn cross_channel_isolation() {
     let mut s: Store<ChannelLang> = Store::new();
     // Channel A: author 1 may add. Channel B: only author 2 may add (author 1 is
     // unauthorized there).
-    s.commit(&founder, TOPIC, TS_BASE, ChannelOp::OpenChannel {
-        channel: ch("A"),
-        adders: BTreeSet::from([author_id(1)]),
-    });
-    s.commit(&founder, TOPIC, TS_BASE + 1, ChannelOp::OpenChannel {
-        channel: ch("B"),
-        adders: BTreeSet::from([author_id(2)]),
-    });
+    s.commit(
+        &founder,
+        TOPIC,
+        TS_BASE,
+        ChannelOp::OpenChannel {
+            channel: ch("A"),
+            adders: BTreeSet::from([author_id(1)]),
+        },
+    );
+    s.commit(
+        &founder,
+        TOPIC,
+        TS_BASE + 1,
+        ChannelOp::OpenChannel {
+            channel: ch("B"),
+            adders: BTreeSet::from([author_id(2)]),
+        },
+    );
     // The SAME author, the SAME pc, into BOTH channels.
-    s.commit(&dev, TOPIC, TS_BASE + 2, ChannelOp::AddDegree {
-        channel: ch("A"),
-        pc: 7,
-    });
-    s.commit(&dev, TOPIC, TS_BASE + 3, ChannelOp::AddDegree {
-        channel: ch("B"),
-        pc: 7,
-    });
+    s.commit(
+        &dev,
+        TOPIC,
+        TS_BASE + 2,
+        ChannelOp::AddDegree {
+            channel: ch("A"),
+            pc: 7,
+        },
+    );
+    s.commit(
+        &dev,
+        TOPIC,
+        TS_BASE + 3,
+        ChannelOp::AddDegree {
+            channel: ch("B"),
+            pc: 7,
+        },
+    );
 
     let v = s.view();
-    assert!(v[&ch("A")].contains(&7), "pc 7 live in A (author authorized there)");
+    assert!(
+        v[&ch("A")].contains(&7),
+        "pc 7 live in A (author authorized there)"
+    );
     assert!(
         !v[&ch("B")].contains(&7),
         "pc 7 absent in B (same author, unauthorized there) — channels don't leak",
@@ -614,18 +728,33 @@ fn baseline_ops(producer: &mut Store<ChannelLang>) -> Vec<SignedOp> {
     let k2 = author_key(2);
     let adders: BTreeSet<AuthorId> = BTreeSet::from([author_id(1), author_id(2)]);
     vec![
-        producer.commit(&founder, TOPIC, TS_BASE, ChannelOp::OpenChannel {
-            channel: ch("score"),
-            adders,
-        }),
-        producer.commit(&k1, TOPIC, TS_BASE + 1, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 3,
-        }),
-        producer.commit(&k2, TOPIC, TS_BASE + 2, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 9,
-        }),
+        producer.commit(
+            &founder,
+            TOPIC,
+            TS_BASE,
+            ChannelOp::OpenChannel {
+                channel: ch("score"),
+                adders,
+            },
+        ),
+        producer.commit(
+            &k1,
+            TOPIC,
+            TS_BASE + 1,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 3,
+            },
+        ),
+        producer.commit(
+            &k2,
+            TOPIC,
+            TS_BASE + 2,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 9,
+            },
+        ),
     ]
 }
 
@@ -658,8 +787,16 @@ fn adversarial_flood_equivocation_laggard_shuffle() {
     ingest_all(&mut full, &shuffled(&all, 4242));
     let mut clean: Store<ChannelLang> = Store::new();
     ingest_all(&mut clean, &base);
-    assert_eq!(full.view(), expected, "flood of unauthorized adds must be inert");
-    assert_eq!(full.view(), clean.view(), "flood changed nothing in the view");
+    assert_eq!(
+        full.view(),
+        expected,
+        "flood of unauthorized adds must be inert"
+    );
+    assert_eq!(
+        full.view(),
+        clean.view(),
+        "flood changed nothing in the view"
+    );
     assert_eq!(full.pending_len(), 0);
 
     // (b) STORED-BUT-INERT: the flood ops are lifted + synced. entry_hashes and
@@ -692,7 +829,11 @@ fn adversarial_flood_equivocation_laggard_shuffle() {
         let mut s: Store<ChannelLang> = Store::new();
         ingest_all(&mut s, &shuffled(&all, seed));
         assert_eq!(s.pending_len(), 0, "seed {seed} left ops parked");
-        assert_eq!(s.view(), expected, "shuffle {seed} changed the enforced view");
+        assert_eq!(
+            s.view(),
+            expected,
+            "shuffle {seed} changed the enforced view"
+        );
         #[cfg(feature = "test-support")]
         assert_eq!(s.view(), s.view_reference());
         #[cfg(feature = "merkle")]
@@ -700,7 +841,10 @@ fn adversarial_flood_equivocation_laggard_shuffle() {
     }
     #[cfg(feature = "merkle")]
     for r in &roots {
-        assert_eq!(r, &roots[0], "ops_root differs across permutations of the SAME set");
+        assert_eq!(
+            r, &roots[0],
+            "ops_root differs across permutations of the SAME set"
+        );
     }
 
     // (d) Equivocation: an unauthorized author forks its log — two ops at genesis
@@ -710,17 +854,27 @@ fn adversarial_flood_equivocation_laggard_shuffle() {
     let equiv_author = author_key(6); // NOT in adders
     let fork_a = {
         let mut s: Store<ChannelLang> = Store::new();
-        s.commit(&equiv_author, TOPIC, TS_BASE + 200, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 700,
-        })
+        s.commit(
+            &equiv_author,
+            TOPIC,
+            TS_BASE + 200,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 700,
+            },
+        )
     };
     let fork_b = {
         let mut s: Store<ChannelLang> = Store::new();
-        s.commit(&equiv_author, TOPIC, TS_BASE + 200, ChannelOp::AddDegree {
-            channel: ch("score"),
-            pc: 701,
-        })
+        s.commit(
+            &equiv_author,
+            TOPIC,
+            TS_BASE + 200,
+            ChannelOp::AddDegree {
+                channel: ch("score"),
+                pc: 701,
+            },
+        )
     };
     let mut eq: Store<ChannelLang> = Store::new();
     ingest_all(&mut eq, &base);
@@ -731,7 +885,11 @@ fn adversarial_flood_equivocation_laggard_shuffle() {
         base.len() + 2,
         "both equivocating forks lift as distinct entries (no dedup across the fork)",
     );
-    assert_eq!(eq.view(), expected, "equivocation by a voided author changes nothing");
+    assert_eq!(
+        eq.view(),
+        expected,
+        "equivocation by a voided author changes nothing"
+    );
 
     // (e) Laggard / deferral: ingest the causally-LATEST op first (it observes the
     // whole chain) -> it PARKS; backfill the rest -> it lifts, pending -> 0, and the
@@ -739,11 +897,22 @@ fn adversarial_flood_equivocation_laggard_shuffle() {
     let mut lag: Store<ChannelLang> = Store::new();
     let latest = all.last().expect("non-empty");
     let lifted = lag.ingest_verified(verify(latest));
-    assert!(lifted.is_empty(), "the causally-latest op parks (incomplete past)");
+    assert!(
+        lifted.is_empty(),
+        "the causally-latest op parks (incomplete past)"
+    );
     assert!(lag.pending_len() >= 1, "it is parked");
     ingest_all(&mut lag, &all[..all.len() - 1]);
-    assert_eq!(lag.pending_len(), 0, "liveness: nothing stuck after backfill");
-    assert_eq!(lag.view(), expected, "laggard arrival did not change enforcement");
+    assert_eq!(
+        lag.pending_len(),
+        0,
+        "liveness: nothing stuck after backfill"
+    );
+    assert_eq!(
+        lag.view(),
+        expected,
+        "laggard arrival did not change enforcement"
+    );
 
     println!(
         "PASS gate 4 (adversarial): 12-op unauthorized flood INERT (view unchanged); \
@@ -768,24 +937,44 @@ fn policy_resolves_by_causal_maxima() {
     let k1 = author_key(1);
     let k2 = author_key(2);
     let mut s: Store<ChannelLang> = Store::new();
-    s.commit(&founder, TOPIC, TS_BASE, ChannelOp::OpenChannel {
-        channel: ch("score"),
-        adders: BTreeSet::from([author_id(1)]),
-    });
+    s.commit(
+        &founder,
+        TOPIC,
+        TS_BASE,
+        ChannelOp::OpenChannel {
+            channel: ch("score"),
+            adders: BTreeSet::from([author_id(1)]),
+        },
+    );
     // author 2 not yet authorized:
-    let early = s.commit(&k2, TOPIC, TS_BASE + 1, ChannelOp::AddDegree {
-        channel: ch("score"),
-        pc: 4,
-    });
+    let early = s.commit(
+        &k2,
+        TOPIC,
+        TS_BASE + 1,
+        ChannelOp::AddDegree {
+            channel: ch("score"),
+            pc: 4,
+        },
+    );
     // reopen observes the first open -> supersedes it (causal maxima).
-    s.commit(&founder, TOPIC, TS_BASE + 2, ChannelOp::OpenChannel {
-        channel: ch("score"),
-        adders: BTreeSet::from([author_id(1), author_id(2)]),
-    });
-    let after = s.commit(&k2, TOPIC, TS_BASE + 3, ChannelOp::AddDegree {
-        channel: ch("score"),
-        pc: 6,
-    });
+    s.commit(
+        &founder,
+        TOPIC,
+        TS_BASE + 2,
+        ChannelOp::OpenChannel {
+            channel: ch("score"),
+            adders: BTreeSet::from([author_id(1), author_id(2)]),
+        },
+    );
+    let after = s.commit(
+        &k2,
+        TOPIC,
+        TS_BASE + 3,
+        ChannelOp::AddDegree {
+            channel: ch("score"),
+            pc: 6,
+        },
+    );
     let _ = (early, after);
     // Under the resolved (latest) policy {1,2}, BOTH of author 2's adds count — the
     // policy is a property of the merged channel, not of causal position.
@@ -799,24 +988,44 @@ fn policy_resolves_by_causal_maxima() {
     // partitioned stores (genuinely concurrent), converge to ONE deterministic
     // winner regardless of ingest order.
     let mut p: Store<ChannelLang> = Store::new();
-    let open_x = p.commit(&founder, TOPIC, TS_BASE, ChannelOp::OpenChannel {
-        channel: ch("dup"),
-        adders: BTreeSet::from([author_id(1)]),
-    });
+    let open_x = p.commit(
+        &founder,
+        TOPIC,
+        TS_BASE,
+        ChannelOp::OpenChannel {
+            channel: ch("dup"),
+            adders: BTreeSet::from([author_id(1)]),
+        },
+    );
     let mut q: Store<ChannelLang> = Store::new();
-    let open_y = q.commit(&founder, TOPIC, TS_BASE, ChannelOp::OpenChannel {
-        channel: ch("dup"),
-        adders: BTreeSet::from([author_id(2)]),
-    });
+    let open_y = q.commit(
+        &founder,
+        TOPIC,
+        TS_BASE,
+        ChannelOp::OpenChannel {
+            channel: ch("dup"),
+            adders: BTreeSet::from([author_id(2)]),
+        },
+    );
     // author 1 and author 2 each add pc 1 to "dup" (partitioned chains).
-    let add1 = p.commit(&k1, TOPIC, TS_BASE + 1, ChannelOp::AddDegree {
-        channel: ch("dup"),
-        pc: 1,
-    });
-    let add2 = q.commit(&k2, TOPIC, TS_BASE + 1, ChannelOp::AddDegree {
-        channel: ch("dup"),
-        pc: 1,
-    });
+    let add1 = p.commit(
+        &k1,
+        TOPIC,
+        TS_BASE + 1,
+        ChannelOp::AddDegree {
+            channel: ch("dup"),
+            pc: 1,
+        },
+    );
+    let add2 = q.commit(
+        &k2,
+        TOPIC,
+        TS_BASE + 1,
+        ChannelOp::AddDegree {
+            channel: ch("dup"),
+            pc: 1,
+        },
+    );
     let race = vec![open_x, open_y, add1, add2];
 
     let mut ref_view: Option<BTreeMap<ChannelId, BTreeSet<u16>>> = None;

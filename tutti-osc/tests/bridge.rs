@@ -26,14 +26,15 @@ fn pluck() -> Envelope {
 /// A view with two live degrees (0 held by two authors, 4 by one) and a facet
 /// on degree 0.
 fn view_two() -> MusicView {
-    let mut view = MusicView::default();
-    view.live = BTreeSet::from([degree(0), degree(4)]);
-    view.holders = BTreeMap::from([
-        (degree(0), BTreeSet::from([author(1), author(2)])),
-        (degree(4), BTreeSet::from([author(1)])),
-    ]);
-    view.envelopes = BTreeMap::from([(degree(0), pluck())]);
-    view
+    MusicView {
+        live: BTreeSet::from([degree(0), degree(4)]),
+        holders: BTreeMap::from([
+            (degree(0), BTreeSet::from([author(1), author(2)])),
+            (degree(4), BTreeSet::from([author(1)])),
+        ]),
+        envelopes: BTreeMap::from([(degree(0), pluck())]),
+        ..MusicView::default()
+    }
 }
 
 /// `view_two` with degree 4 retracted (its holders entry gone; facets persist).
@@ -59,12 +60,18 @@ fn projection_is_a_pure_total_image_of_the_view() {
         "/tutti/1/my-room/degrees",
         "/tutti/1/my-room/tuning",
     ];
-    assert_eq!(target.keys().map(String::as_str).collect::<Vec<_>>(), expected);
+    assert_eq!(
+        target.keys().map(String::as_str).collect::<Vec<_>>(),
+        expected
+    );
     assert_eq!(
         target["/tutti/1/my-room/degrees"],
         vec![OscArg::Float(60.0), OscArg::Float(64.0)]
     );
-    assert_eq!(target["/tutti/1/my-room/degree/0/holders"], vec![OscArg::Int(2)]);
+    assert_eq!(
+        target["/tutti/1/my-room/degree/0/holders"],
+        vec![OscArg::Int(2)]
+    );
     // env: interp code then flattened (ms, level) pairs.
     assert_eq!(
         target["/tutti/1/my-room/degree/0/env"],
@@ -82,7 +89,10 @@ fn projection_is_a_pure_total_image_of_the_view() {
     assert_eq!(target, address::project("my room", &view_two()));
     // Every message encodes and round-trips through the codec.
     for (addr, args) in &target {
-        let msg = OscMessage { addr: addr.clone(), args: args.clone() };
+        let msg = OscMessage {
+            addr: addr.clone(),
+            args: args.clone(),
+        };
         assert_eq!(OscMessage::decode(&msg.encode()).unwrap(), msg);
     }
 }
@@ -129,10 +139,7 @@ fn the_gap_is_never_replayed() {
     let out = bridge.on_attach(Attach::Resumed, &view_two());
     assert_eq!(
         addrs(&out),
-        vec![
-            "/tutti/1/room/degree/4/holders",
-            "/tutti/1/room/degrees"
-        ]
+        vec!["/tutti/1/room/degree/4/holders", "/tutti/1/room/degrees"]
     );
 }
 
@@ -142,8 +149,15 @@ fn reattach_with_an_unchanged_view_is_idempotent() {
     bridge.on_attach(Attach::Fresh, &view_two());
     let epoch = bridge.epoch();
     for policy in [Attach::Fresh, Attach::Resumed, Attach::Unknowable] {
-        assert!(bridge.on_attach(policy, &view_two()).is_empty(), "{policy:?}");
-        assert_eq!(bridge.epoch(), epoch, "a live-cable attach is not a transition");
+        assert!(
+            bridge.on_attach(policy, &view_two()).is_empty(),
+            "{policy:?}"
+        );
+        assert_eq!(
+            bridge.epoch(),
+            epoch,
+            "a live-cable attach is not a transition"
+        );
     }
     bridge.on_detach();
     assert!(bridge.on_attach(Attach::Resumed, &view_two()).is_empty());

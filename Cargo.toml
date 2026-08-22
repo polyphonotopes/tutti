@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["tutti-core", "tutti-music", "tutti-midi", "tutti-osc"]
+members = ["tutti-core", "tutti-music", "tutti-music-hhhs", "tutti-midi", "tutti-osc"]
 # tutti-amy links the AMY C synth via a cc build.rs; it needs a C toolchain, so
 # it's out of the default build and built on its own.
 exclude = ["tutti-amy"]

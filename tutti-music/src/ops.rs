@@ -1,8 +1,8 @@
 //! The music op alphabet — the wire vocabulary every tutti music peer speaks.
 //!
-//! **Evolution discipline** (inherited from the substrate): append variants,
-//! never reorder them, add fields only as `#[serde(default)]`, and bump
-//! [`MusicLang::SCHEMA_VERSION`](crate::MusicLang) on a payload-shape change.
+//! Protocol generations are owned by the canonical-history adapter. Existing
+//! variants are stable within a generation; a shape change requires a new
+//! adapter generation rather than a compatibility shim.
 //!
 //! Deliberately absent: note events as durable ops. Performance is presence-
 //! lease-shaped and never enters the log — the pitch-set is the shared object;
@@ -31,7 +31,10 @@ pub enum MusicOp {
 }
 
 /// Wire well-formedness for one [`MusicOp`] — bounds only, run once at ingress.
-pub(crate) fn validate_wire(op: &MusicOp) -> Result<(), String> {
+/// Validate the bounded protocol shape independently of any envelope or
+/// storage stack. Alternate canonical-history adapters call this at their own
+/// admission boundary.
+pub fn validate(op: &MusicOp) -> Result<(), String> {
     let validate_degree = |degree: TunedDegree| {
         if usize::from(degree.degree.index()) >= MAX_SCALE_DEGREES {
             Err(format!(
@@ -66,4 +69,9 @@ pub(crate) fn validate_wire(op: &MusicOp) -> Result<(), String> {
             .map(|_| ())
             .map_err(|error| error.to_string()),
     }
+}
+
+#[cfg(feature = "legacy-source-log")]
+pub(crate) fn validate_wire(op: &MusicOp) -> Result<(), String> {
+    validate(op)
 }

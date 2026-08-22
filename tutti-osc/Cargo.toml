@@ -8,4 +8,4 @@ rust-version = "1.97.1"
 # The music protocol: the view this bridge projects and the fractional-MIDI
 # resolution its floats carry. Nothing else — the codec is hand-rolled and the
 # core is sans-io (sockets stay in the app's driver).
-tutti-music = { path = "../tutti-music" }
+tutti-music = { path = "../tutti-music", features = ["legacy-source-log"] }

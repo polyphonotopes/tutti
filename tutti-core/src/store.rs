@@ -437,13 +437,7 @@ impl<L: OpLanguage> Store<L> {
     /// Author, sign, verify, and ingest a new local op, returning the signed bytes
     /// for gossip. In-memory/test callers use this convenience wrapper; durable
     /// runtimes should call [`Store::prepare_commit`], persist, then ingest.
-    pub fn commit(
-        &mut self,
-        key: &SigningKey,
-        topic: &str,
-        ts_micros: u64,
-        op: L::Op,
-    ) -> SignedOp {
+    pub fn commit(&mut self, key: &SigningKey, topic: &str, ts_micros: u64, op: L::Op) -> SignedOp {
         let signed = self.prepare_commit(key, topic, ts_micros, op);
         let verified = verify_signed_op_in::<L>(&signed).expect("a just-signed op verifies");
         self.ingest_verified(verified);

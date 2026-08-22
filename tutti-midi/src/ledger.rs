@@ -457,8 +457,7 @@ impl<S: Ord + Clone> MidiLedger<S> {
 fn bend_value(deviation_semitones: f64, range_semitones: f64) -> u16 {
     let raw = if deviation_semitones >= 0.0 {
         f64::from(PITCH_BEND_CENTER)
-            + deviation_semitones / range_semitones
-                * f64::from(u16::MAX.min(16383) - PITCH_BEND_CENTER)
+            + deviation_semitones / range_semitones * f64::from(16383 - PITCH_BEND_CENTER)
     } else {
         f64::from(PITCH_BEND_CENTER)
             + deviation_semitones / range_semitones * f64::from(PITCH_BEND_CENTER)

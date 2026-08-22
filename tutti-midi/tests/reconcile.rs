@@ -114,7 +114,11 @@ fn connect_is_a_reconcile_from_silence_and_detached_views_emit_nothing() {
 fn steady_state_emits_exactly_the_delta_offs_before_ons() {
     let (mut bridge, tuning) = bridge12();
     let mut endpoint = FakeEndpoint::default();
-    endpoint.hear(&bridge.on_attach(Attach::Fresh, &target(&tuning, &[(1, 0), (2, 7)]), &tuning).messages);
+    endpoint.hear(
+        &bridge
+            .on_attach(Attach::Fresh, &target(&tuning, &[(1, 0), (2, 7)]), &tuning)
+            .messages,
+    );
 
     // Source 2 leaves, source 3 arrives: one off (first), one on.
     let out = bridge.on_view(&target(&tuning, &[(1, 0), (3, 4)]), &tuning);
@@ -122,14 +126,27 @@ fn steady_state_emits_exactly_the_delta_offs_before_ons() {
     assert_eq!(
         out.messages,
         vec![
-            MidiMessage::NoteOff { channel: 0, note: 67, velocity: 0 },
-            MidiMessage::NoteOn { channel: 0, note: 64, velocity: tutti_midi::DEFAULT_VELOCITY },
+            MidiMessage::NoteOff {
+                channel: 0,
+                note: 67,
+                velocity: 0
+            },
+            MidiMessage::NoteOn {
+                channel: 0,
+                note: 64,
+                velocity: tutti_midi::DEFAULT_VELOCITY
+            },
         ]
     );
     assert_eq!(endpoint.sounding, shadow_voices(&bridge));
 
     // An unchanged view emits nothing.
-    assert!(bridge.on_view(&target(&tuning, &[(1, 0), (3, 4)]), &tuning).messages.is_empty());
+    assert!(
+        bridge
+            .on_view(&target(&tuning, &[(1, 0), (3, 4)]), &tuning)
+            .messages
+            .is_empty()
+    );
 }
 
 #[test]
@@ -142,7 +159,12 @@ fn the_gap_is_never_replayed() {
     // Cable drops; the endpoint keeps its state. A degree is added AND removed
     // while detached — the endpoint must never hear about it.
     bridge.on_detach();
-    assert!(bridge.on_view(&target(&tuning, &[(1, 0), (2, 4)]), &tuning).messages.is_empty());
+    assert!(
+        bridge
+            .on_view(&target(&tuning, &[(1, 0), (2, 4)]), &tuning)
+            .messages
+            .is_empty()
+    );
     assert!(bridge.on_view(&held, &tuning).messages.is_empty());
 
     let out = bridge.on_attach(Attach::Resumed, &held, &tuning);
@@ -156,7 +178,11 @@ fn the_gap_is_never_replayed() {
     endpoint.hear(&out.messages);
     assert_eq!(
         out.messages,
-        vec![MidiMessage::NoteOn { channel: 0, note: 64, velocity: tutti_midi::DEFAULT_VELOCITY }]
+        vec![MidiMessage::NoteOn {
+            channel: 0,
+            note: 64,
+            velocity: tutti_midi::DEFAULT_VELOCITY
+        }]
     );
     assert_eq!(endpoint.sounding, shadow_voices(&bridge));
 }
@@ -209,8 +235,14 @@ fn unknowable_fails_to_silence_then_rebuilds() {
         );
         assert_eq!(endpoint.sounding, BTreeSet::from([(0, 64)]));
         // The panic prefix really is offs/resets before the rebuild's on.
-        assert!(matches!(out.messages.first(), Some(MidiMessage::NoteOff { .. })));
-        assert!(matches!(out.messages.last(), Some(MidiMessage::NoteOn { note: 64, .. })));
+        assert!(matches!(
+            out.messages.first(),
+            Some(MidiMessage::NoteOff { .. })
+        ));
+        assert!(matches!(
+            out.messages.last(),
+            Some(MidiMessage::NoteOn { note: 64, .. })
+        ));
     }
 }
 
@@ -220,7 +252,11 @@ fn tuning_change_is_panic_then_repopulate() {
         Tuning::from_scl_text("quarter", "quarter tones\n2\n50.0\n1200.0\n", None).unwrap();
     let (mut bridge, tuning) = bridge12();
     let mut endpoint = FakeEndpoint::default();
-    endpoint.hear(&bridge.on_attach(Attach::Fresh, &target(&tuning, &[(1, 0), (2, 4)]), &tuning).messages);
+    endpoint.hear(
+        &bridge
+            .on_attach(Attach::Fresh, &target(&tuning, &[(1, 0), (2, 4)]), &tuning)
+            .messages,
+    );
 
     // Explicit change: MPE config under the microtonal tuning.
     let new_target = target(&quarter, &[(1, 1)]);
@@ -230,21 +266,35 @@ fn tuning_change_is_panic_then_repopulate() {
     endpoint.hear(&out.messages);
     assert!(out.unroutable.is_empty());
     // Offs for both old voices came before the new note-on.
-    let first_on = out.messages.iter().position(|m| matches!(m, MidiMessage::NoteOn { .. })).unwrap();
+    let first_on = out
+        .messages
+        .iter()
+        .position(|m| matches!(m, MidiMessage::NoteOn { .. }))
+        .unwrap();
     let offs_before = out.messages[..first_on]
         .iter()
         .filter(|m| matches!(m, MidiMessage::NoteOff { .. }))
         .count();
-    assert_eq!(offs_before, 2, "both old voices released before the rebuild");
+    assert_eq!(
+        offs_before, 2,
+        "both old voices released before the rebuild"
+    );
     assert_eq!(endpoint.sounding, shadow_voices(&bridge));
 
     // The same doctrine fires implicitly when on_view sees a flipped register.
     let (mut bridge, tuning) = bridge12();
     let mut endpoint = FakeEndpoint::default();
-    endpoint.hear(&bridge.on_attach(Attach::Fresh, &target(&tuning, &[(1, 0)]), &tuning).messages);
+    endpoint.hear(
+        &bridge
+            .on_attach(Attach::Fresh, &target(&tuning, &[(1, 0)]), &tuning)
+            .messages,
+    );
     let out = bridge.on_view(&target(&quarter, &[(1, 0)]), &quarter);
     endpoint.hear(&out.messages);
-    assert!(matches!(out.messages.first(), Some(MidiMessage::NoteOff { .. })));
+    assert!(matches!(
+        out.messages.first(),
+        Some(MidiMessage::NoteOff { .. })
+    ));
     assert_eq!(endpoint.sounding, shadow_voices(&bridge));
 }
 
@@ -265,8 +315,15 @@ fn unroutable_sources_are_surfaced_not_swallowed() {
     let out = bridge.on_attach(Attach::Fresh, &t, &quarter);
     endpoint.hear(&out.messages);
     assert_eq!(out.unroutable.len(), 1);
-    assert!(matches!(out.unroutable[0], (2, MidiRouteError::MpeChannelsExhausted)));
-    assert_eq!(endpoint.sounding, shadow_voices(&bridge), "the shadow stays honest");
+    assert!(matches!(
+        out.unroutable[0],
+        (2, MidiRouteError::MpeChannelsExhausted)
+    ));
+    assert_eq!(
+        endpoint.sounding,
+        shadow_voices(&bridge),
+        "the shadow stays honest"
+    );
 
     // When the channel frees up, the reported source becomes routable.
     let out = bridge.on_view(&target(&quarter, &[(2, 1)]), &quarter);
@@ -295,7 +352,7 @@ fn no_stuck_notes_across_random_interleavings() {
                 // View churn: add/move/remove one of 8 sources.
                 0..=5 => {
                     let source = (rng.next() % 8) as u8;
-                    if rng.next() % 3 == 0 {
+                    if rng.next().is_multiple_of(3) {
                         current.remove(&source);
                     } else {
                         let degree = (rng.next() % 12) as u16;
@@ -321,7 +378,7 @@ fn no_stuck_notes_across_random_interleavings() {
                             }
                             1 => Attach::Resumed,
                             _ => {
-                                if rng.next() % 2 == 0 {
+                                if rng.next().is_multiple_of(2) {
                                     endpoint.power_cycle();
                                 }
                                 Attach::Unknowable
@@ -345,11 +402,18 @@ fn no_stuck_notes_across_random_interleavings() {
 
         // Fail to silence: reattach if needed, then an empty view.
         if !bridge.is_attached() {
-            endpoint.hear(&bridge.on_attach(Attach::Resumed, &current, &tuning).messages);
+            endpoint.hear(
+                &bridge
+                    .on_attach(Attach::Resumed, &current, &tuning)
+                    .messages,
+            );
         }
         current.clear();
         endpoint.hear(&bridge.on_view(&current, &tuning).messages);
-        assert!(endpoint.sounding.is_empty(), "seed {seed}: stuck notes at teardown");
+        assert!(
+            endpoint.sounding.is_empty(),
+            "seed {seed}: stuck notes at teardown"
+        );
         assert!(shadow_voices(&bridge).is_empty());
     }
 }

@@ -58,7 +58,7 @@ pub fn project(topic: &str, view: &MusicView) -> BTreeMap<String, Vec<OscArg>> {
 
     // The view's degrees are scoped to its resolved tuning, which was
     // wire-validated at ingress; the `.ok()` is defensive.
-    if let Some(tuning) = view.tuning.validate("osc projection").ok() {
+    if let Ok(tuning) = view.tuning.validate("osc projection") {
         let degrees: Vec<OscArg> = view
             .live
             .iter()
@@ -76,10 +76,7 @@ pub fn project(topic: &str, view: &MusicView) -> BTreeMap<String, Vec<OscArg>> {
             args.push(OscArg::Int(i32::from(ms)));
             args.push(OscArg::Int(i32::from(level)));
         }
-        target.insert(
-            format!("{base}/degree/{}/env", degree.degree.index()),
-            args,
-        );
+        target.insert(format!("{base}/degree/{}/env", degree.degree.index()), args);
     }
 
     for (degree, authors) in &view.holders {

@@ -21,12 +21,12 @@ test-support = ["dep:hhhs"]
 
 [dependencies]
 # Signed per-author op envelopes: header signing/verification, CBOR body framing.
-p2panda-core = "0.7"
+p2panda-core = "=0.7.0"
 # The dependency-free causal floor tutti-core sits ATOP: opaque-payload DAG with fixed
 # entry identity, the `Reach` ancestry contract + lazy oracle, and the bounded
-# windowed store. Every production tutti import is a floor symbol. Pinned to the exact
-# rev walkie uses so entry hashes unify across the extraction.
-hhhs-dag = { git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "82b9ddb", features = ["serde"] }
+# windowed store. Every production tutti import is a floor symbol. The explicit
+# 0.4 tag keeps standalone Tutti and every embedding on one HHHS graph.
+hhhs-dag = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0", features = ["serde"] }
 # Convergence digest + Merkle commitments.
 blake3 = "=1.8.5"
 # Canonical blake3-256 radix trie for `ops_root`/`prove_op` (feature `merkle`).
@@ -36,9 +36,9 @@ serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 # The facts front door (`cover::ReachIndex` + `register::resolve`) — reached ONLY by
 # the reference-oracle surface (feature `test-support`) and this crate's own tests,
-# never by production tutti. Same rev as `hhhs-dag`, so `hhhs::EntryHash` unifies with
-# `hhhs_dag::EntryHash`.
-hhhs = { git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "82b9ddb", optional = true }
+# never by production tutti. The same pinned 0.4 release as `hhhs-dag` keeps
+# `hhhs::EntryHash` unified with `hhhs_dag::EntryHash`.
+hhhs = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0", optional = true }
 
 # p2panda-core → ed25519-dalek → rand_core 0.6 → getrandom 0.2 must have the "js"
 # backend to COMPILE on wasm32-unknown-unknown (the crate's own compile_error).
@@ -53,4 +53,4 @@ getrandom = { version = "0.2", features = ["js"] }
 # equivalence tests can name `hhhs::cover::ReachIndex` / `hhhs::register` without the
 # `test-support` feature. Production builds still name only `hhhs-dag`.
 [dev-dependencies]
-hhhs = { git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "82b9ddb" }
+hhhs = { version = "0.4.0", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.0" }

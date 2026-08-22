@@ -24,7 +24,7 @@ path = "src/main.rs"
 tutti-core = { path = "../tutti-core", features = ["test-support"] }
 # The music protocol: MusicOp/MusicLang, tuning identity, the facet types, and
 # the render seam this crate compiles to AMY wire strings.
-tutti-music = { path = "../tutti-music" }
+tutti-music = { path = "../tutti-music", features = ["legacy-source-log"] }
 serde = { version = "1.0", features = ["derive"] }
 
 [build-dependencies]

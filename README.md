@@ -1,16 +1,32 @@
 # tutti
 
-A server-less signed-op store for music, plus MIDI / OSC / AMY bridges.
-Peers sign ops, gossip them, converge — no server. Extracted from walkie-songie.
+Tutti contains reusable music state and host adapters. Its HHHS 0.4 protocol
+layer is `tutti-music-hhhs`; networking remains an application concern.
 
-## crates
+## Crates
 
-- `tutti-core` — the substrate: signed-op envelope + fold seam, over [hhhs-dag].
-- `tutti-music` — the music op-language: degrees, tunings, envelopes. State, not events.
-- `tutti-midi` — MIDI in/out. Reconnect re-diffs the current state, so no stuck notes.
-- `tutti-osc` — OSC out, same idea.
-- `tutti-amy` — drives the AMY C synth. Needs clang; excluded from the default build.
+- `tutti-music` — music command/value language: degrees, tunings, and envelopes.
+- `tutti-music-hhhs` — HHHS 0.4 command codec, receiver-bound capability areas,
+  admission policy, production Replica builder, deterministic roots, and
+  rebuildable materializer. It owns no endpoint, mesh, carrier, task runtime,
+  clock, filesystem, or application-extension state.
+- `tutti-core` — the older generic signed-state/fold substrate used by the
+  standalone bridge crates; it is not the Walkie room-v5 authority or sync host.
+- `tutti-midi` — MIDI input/output with state rediff on reconnect.
+- `tutti-osc` — OSC output.
+- `tutti-amy` — AMY C synth bridge; excluded from the default workspace because
+  it requires a C toolchain.
 
-Early. The music wire isn't frozen yet.
+Walkie room v5 imports `tutti-music-hhhs` directly and composes its production
+music Replica with a separate application-extension Replica. A bare music peer
+can therefore share the same music command/admission/materialization protocol
+without learning Walkie's extension lane.
 
-[hhhs-dag]: https://gitlab.com/micahscopes/hhhs-rs
+```sh
+cargo test -p tutti-music-hhhs
+cargo clippy -p tutti-music-hhhs --all-targets -- -D warnings
+```
+
+The generation-5 music wire is deliberately distinct from earlier Walkie/Tutti
+formats. Functional interoperability is the contract; old hashes and hosts are
+not preserved.

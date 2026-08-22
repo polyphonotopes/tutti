@@ -138,7 +138,10 @@ impl DiscardHistory {
     /// batch's root among its `later_batches`, which requires holding the batch.
     fn record(&mut self, entries: Box<[EntryHash]>, pinned_before: Digest) {
         debug_assert!(!entries.is_empty(), "empty batches are never pinned");
-        debug_assert!(entries.is_sorted(), "batch entries must be canonically sorted");
+        debug_assert!(
+            entries.is_sorted(),
+            "batch entries must be canonically sorted"
+        );
         let seq = DiscardBatchSeq(self.next_seq);
         self.next_seq += 1;
         if entries.len() > self.entry_cap {
@@ -590,7 +593,10 @@ impl<L: OpLanguage> WindowedStore<L> {
     /// Advance (never regress) the author's tracked head to the greatest seq seen.
     fn advance_head(&mut self, op: &VerifiedOpG<L>) {
         let advanced = op.advanced_head();
-        let slot = self.heads.entry(op.author()).or_insert_with(LogHead::genesis);
+        let slot = self
+            .heads
+            .entry(op.author())
+            .or_insert_with(LogHead::genesis);
         if advanced.next_seq > slot.next_seq {
             *slot = advanced;
         }
@@ -654,7 +660,12 @@ impl<L: OpLanguage> WindowedStore<L> {
             self.entry_to_source.insert(entry_hash, id);
             self.decoded.insert(
                 entry_hash,
-                DecodedOp::new(op.author(), op.payload().clone(), op.timestamp_ms(), op.seq_num()),
+                DecodedOp::new(
+                    op.author(),
+                    op.payload().clone(),
+                    op.timestamp_ms(),
+                    op.seq_num(),
+                ),
             );
             return TryLift::Lifted(entry_hash);
         }
@@ -665,7 +676,12 @@ impl<L: OpLanguage> WindowedStore<L> {
         self.entry_to_source.insert(entry_hash, id);
         self.decoded.insert(
             entry_hash,
-            DecodedOp::new(op.author(), op.payload().clone(), op.timestamp_ms(), op.seq_num()),
+            DecodedOp::new(
+                op.author(),
+                op.payload().clone(),
+                op.timestamp_ms(),
+                op.seq_num(),
+            ),
         );
         for gone in evicted {
             if let Some(gone_id) = self.entry_to_source.remove(&gone) {
@@ -778,7 +794,11 @@ impl<L: OpLanguage> WindowedStore<L> {
             cp.summary.rebuild(&keep);
             if !discard.is_empty() {
                 cp.discard_history.record(
-                    discard.iter().copied().collect::<Vec<_>>().into_boxed_slice(),
+                    discard
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
                     pinned_before,
                 );
             }
@@ -833,10 +853,13 @@ impl<L: OpLanguage> WindowedStore<L> {
     /// journal's entry cap. Empty on the M3.0 profile.
     pub fn discard_batches(&self) -> impl DoubleEndedIterator<Item = DiscardBatchRef<'_>> + '_ {
         self.checkpoint.iter().flat_map(|cp| {
-            cp.discard_history.batches.iter().map(|batch| DiscardBatchRef {
-                seq: batch.seq,
-                entries: &batch.entries,
-            })
+            cp.discard_history
+                .batches
+                .iter()
+                .map(|batch| DiscardBatchRef {
+                    seq: batch.seq,
+                    entries: &batch.entries,
+                })
         })
     }
 
@@ -941,8 +964,7 @@ impl<L: OpLanguage> WindowedStore<L> {
                 break;
             }
         }
-        let (idx, prevs, entry) =
-            found.ok_or(DeferredLiftError::UnknownCandidate(candidate))?;
+        let (idx, prevs, entry) = found.ok_or(DeferredLiftError::UnknownCandidate(candidate))?;
 
         {
             let cp = self
@@ -961,7 +983,12 @@ impl<L: OpLanguage> WindowedStore<L> {
         self.entry_to_source.insert(candidate, op.id());
         self.decoded.insert(
             candidate,
-            DecodedOp::new(op.author(), op.payload().clone(), op.timestamp_ms(), op.seq_num()),
+            DecodedOp::new(
+                op.author(),
+                op.payload().clone(),
+                op.timestamp_ms(),
+                op.seq_num(),
+            ),
         );
 
         let mut lifted = vec![candidate];
@@ -994,7 +1021,11 @@ impl<L: OpLanguage> WindowedStore<L> {
     ) -> SignedOp {
         use crate::ops::{VersionedOpG, sign_versioned_op};
         let author = AuthorId(*key.verifying_key().as_bytes());
-        let head = self.heads.get(&author).copied().unwrap_or_else(LogHead::genesis);
+        let head = self
+            .heads
+            .get(&author)
+            .copied()
+            .unwrap_or_else(LogHead::genesis);
         let observed = self.observed_frontier();
         let versioned =
             VersionedOpG::<L>::current_for_topic(op, ts_micros, topic).observing(observed);
@@ -1005,13 +1036,7 @@ impl<L: OpLanguage> WindowedStore<L> {
     /// Author, sign, verify, and ingest a new local op, returning the signed bytes.
     /// In-memory/test convenience; durable runtimes call [`WindowedStore::prepare_commit`]
     /// then persist then ingest.
-    pub fn commit(
-        &mut self,
-        key: &SigningKey,
-        topic: &str,
-        ts_micros: u64,
-        op: L::Op,
-    ) -> SignedOp {
+    pub fn commit(&mut self, key: &SigningKey, topic: &str, ts_micros: u64, op: L::Op) -> SignedOp {
         use crate::ops::verify_signed_op_in;
         let signed = self.prepare_commit(key, topic, ts_micros, op);
         let verified = verify_signed_op_in::<L>(&signed).expect("a just-signed op verifies");

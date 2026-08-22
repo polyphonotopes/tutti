@@ -18,8 +18,11 @@ fn edo31() -> TuningDefinition {
     for step in 1..=31 {
         scl.push_str(&format!("{:.6}\n", f64::from(step) * 1200.0 / 31.0));
     }
-    TuningDefinition::new(scl, Some("0\n0\n127\n60\n60\n261.6255653005986\n0\n".to_owned()))
-        .expect("the generated 31-EDO definition is valid")
+    TuningDefinition::new(
+        scl,
+        Some("0\n0\n127\n60\n60\n261.6255653005986\n0\n".to_owned()),
+    )
+    .expect("the generated 31-EDO definition is valid")
 }
 
 fn edo31_tuning() -> Tuning {
@@ -70,16 +73,45 @@ fn partition_then_converge_to_union() {
         ts
     };
 
-    let mut a_ops = vec![a.commit(&ka, TOPIC, tick(), MusicOp::SetTuning { definition: edo31() })];
+    let mut a_ops = vec![a.commit(
+        &ka,
+        TOPIC,
+        tick(),
+        MusicOp::SetTuning {
+            definition: edo31(),
+        },
+    )];
     for pc in [0, 10, 18] {
-        a_ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::AddDegree { degree: degree31(pc) }));
+        a_ops.push(a.commit(
+            &ka,
+            TOPIC,
+            tick(),
+            MusicOp::AddDegree {
+                degree: degree31(pc),
+            },
+        ));
     }
-    let mut b_ops = vec![b.commit(&kb, TOPIC, tick(), MusicOp::SetTuning { definition: edo31() })];
+    let mut b_ops = vec![b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::SetTuning {
+            definition: edo31(),
+        },
+    )];
     for op in [
-        MusicOp::AddDegree { degree: degree31(8) },
-        MusicOp::AddDegree { degree: degree31(25) },
-        MusicOp::AddDegree { degree: degree31(5) },
-        MusicOp::RemoveDegree { degree: degree31(5) },
+        MusicOp::AddDegree {
+            degree: degree31(8),
+        },
+        MusicOp::AddDegree {
+            degree: degree31(25),
+        },
+        MusicOp::AddDegree {
+            degree: degree31(5),
+        },
+        MusicOp::RemoveDegree {
+            degree: degree31(5),
+        },
     ] {
         b_ops.push(b.commit(&kb, TOPIC, tick(), op));
     }
@@ -96,7 +128,10 @@ fn partition_then_converge_to_union() {
 
     assert_eq!(a.view(), b.view(), "peers must converge");
     assert_eq!(indices(&a.view()), BTreeSet::from([0, 8, 10, 18, 25]));
-    assert!(!a.view().live.contains(&degree31(5)), "the observed remove wins");
+    assert!(
+        !a.view().live.contains(&degree31(5)),
+        "the observed remove wins"
+    );
     assert_eq!(a.view().tuning, edo31(), "the tuning register converged");
     assert_eq!(a.pending_len(), 0);
     assert_eq!(b.pending_len(), 0);
@@ -116,19 +151,45 @@ fn convergence_is_order_independent() {
         ts += 1;
         ts
     };
-    ops.push(producer_a.commit(&ka, TOPIC, tick(), MusicOp::SetTuning { definition: edo31() }));
-    ops.push(producer_b.commit(&kb, TOPIC, tick(), MusicOp::SetTuning { definition: edo31() }));
+    ops.push(producer_a.commit(
+        &ka,
+        TOPIC,
+        tick(),
+        MusicOp::SetTuning {
+            definition: edo31(),
+        },
+    ));
+    ops.push(producer_b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::SetTuning {
+            definition: edo31(),
+        },
+    ));
     for (key, producer, pcs) in [
         (&ka, &mut producer_a, [0u16, 10, 18].as_slice()),
         (&kb, &mut producer_b, [8u16, 25, 5].as_slice()),
     ] {
         for &pc in pcs {
-            ops.push(producer.commit(key, TOPIC, tick(), MusicOp::AddDegree {
-                degree: degree31(pc),
-            }));
+            ops.push(producer.commit(
+                key,
+                TOPIC,
+                tick(),
+                MusicOp::AddDegree {
+                    degree: degree31(pc),
+                },
+            ));
         }
     }
-    ops.push(producer_b.commit(&kb, TOPIC, tick(), MusicOp::RemoveDegree { degree: degree31(5) }));
+    ops.push(producer_b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::RemoveDegree {
+            degree: degree31(5),
+        },
+    ));
 
     let mut reference: Option<MusicView> = None;
     for rot in [0usize, 1, 3, 5, 7] {
@@ -138,7 +199,11 @@ fn convergence_is_order_independent() {
             store.ingest_verified(verify(&ops[(i + rot) % n]));
         }
         assert_eq!(store.pending_len(), 0, "rot {rot} left ops parked");
-        assert_eq!(store.view(), store.view_reference(), "rot {rot}: lazy != oracle");
+        assert_eq!(
+            store.view(),
+            store.view_reference(),
+            "rot {rot}: lazy != oracle"
+        );
         assert_eq!(indices(&store.view()), BTreeSet::from([0, 8, 10, 18, 25]));
         match &reference {
             None => reference = Some(store.view()),
@@ -171,7 +236,11 @@ fn add_wins_over_concurrent_remove() {
     assert!(a.view().live.contains(&d), "concurrent add must win");
     assert_eq!(a.view(), b.view(), "peers converge");
     let holders = &a.view().holders[&d];
-    assert_eq!(holders.len(), 1, "only A's add survived B's observed remove");
+    assert_eq!(
+        holders.len(),
+        1,
+        "only A's add survived B's observed remove"
+    );
 }
 
 /// A degree added then removed WITHIN one causal chain is gone.
@@ -179,9 +248,26 @@ fn add_wins_over_concurrent_remove() {
 fn observed_remove_actually_removes() {
     let ka = signing_key_from_seed(&[9u8; 32]);
     let mut a: Store<MusicLang> = Store::new();
-    a.commit(&ka, TOPIC, 1, MusicOp::AddDegree { degree: degree12(3) });
-    a.commit(&ka, TOPIC, 2, MusicOp::RemoveDegree { degree: degree12(3) });
-    assert!(a.view().live.is_empty(), "observed remove clears the degree");
+    a.commit(
+        &ka,
+        TOPIC,
+        1,
+        MusicOp::AddDegree {
+            degree: degree12(3),
+        },
+    );
+    a.commit(
+        &ka,
+        TOPIC,
+        2,
+        MusicOp::RemoveDegree {
+            degree: degree12(3),
+        },
+    );
+    assert!(
+        a.view().live.is_empty(),
+        "observed remove clears the degree"
+    );
 }
 
 /// Concurrent `SetEnvelope`s on the same degree resolve to ONE causal-maxima
@@ -196,13 +282,45 @@ fn envelope_registers_converge_across_peers() {
 
     let a_ops = vec![
         a.commit(&ka, TOPIC, 1, MusicOp::AddDegree { degree: contested }),
-        a.commit(&ka, TOPIC, 2, MusicOp::SetEnvelope { degree: contested, env: swell() }),
-        a.commit(&ka, TOPIC, 3, MusicOp::SetEnvelope { degree: a_only, env: swell() }),
+        a.commit(
+            &ka,
+            TOPIC,
+            2,
+            MusicOp::SetEnvelope {
+                degree: contested,
+                env: swell(),
+            },
+        ),
+        a.commit(
+            &ka,
+            TOPIC,
+            3,
+            MusicOp::SetEnvelope {
+                degree: a_only,
+                env: swell(),
+            },
+        ),
     ];
     let b_ops = vec![
         b.commit(&kb, TOPIC, 1, MusicOp::AddDegree { degree: contested }),
-        b.commit(&kb, TOPIC, 2, MusicOp::SetEnvelope { degree: contested, env: pluck() }),
-        b.commit(&kb, TOPIC, 3, MusicOp::SetEnvelope { degree: b_only, env: pluck() }),
+        b.commit(
+            &kb,
+            TOPIC,
+            2,
+            MusicOp::SetEnvelope {
+                degree: contested,
+                env: pluck(),
+            },
+        ),
+        b.commit(
+            &kb,
+            TOPIC,
+            3,
+            MusicOp::SetEnvelope {
+                degree: b_only,
+                env: pluck(),
+            },
+        ),
     ];
 
     for signed in &b_ops {
@@ -214,7 +332,10 @@ fn envelope_registers_converge_across_peers() {
 
     assert_eq!(a.view(), b.view(), "peers converge on the same registers");
     let won = &a.view().envelopes[&contested];
-    assert!(*won == swell() || *won == pluck(), "winner is one of the writes");
+    assert!(
+        *won == swell() || *won == pluck(),
+        "winner is one of the writes"
+    );
     assert_eq!(a.view().envelopes[&a_only], swell());
     assert_eq!(a.view().envelopes[&b_only], pluck());
     assert_eq!(a.pending_len(), 0);
@@ -228,8 +349,24 @@ fn envelope_register_lww_by_causal_order() {
     let ka = signing_key_from_seed(&[42u8; 32]);
     let mut a: Store<MusicLang> = Store::new();
     let d = degree12(0);
-    a.commit(&ka, TOPIC, 1, MusicOp::SetEnvelope { degree: d, env: swell() });
-    a.commit(&ka, TOPIC, 2, MusicOp::SetEnvelope { degree: d, env: pluck() });
+    a.commit(
+        &ka,
+        TOPIC,
+        1,
+        MusicOp::SetEnvelope {
+            degree: d,
+            env: swell(),
+        },
+    );
+    a.commit(
+        &ka,
+        TOPIC,
+        2,
+        MusicOp::SetEnvelope {
+            degree: d,
+            env: pluck(),
+        },
+    );
     assert_eq!(a.view().envelopes[&d], pluck());
 }
 
@@ -241,7 +378,15 @@ fn removing_a_degree_keeps_its_envelope_facet() {
     let mut a: Store<MusicLang> = Store::new();
     let d = degree12(4);
     a.commit(&ka, TOPIC, 1, MusicOp::AddDegree { degree: d });
-    a.commit(&ka, TOPIC, 2, MusicOp::SetEnvelope { degree: d, env: pluck() });
+    a.commit(
+        &ka,
+        TOPIC,
+        2,
+        MusicOp::SetEnvelope {
+            degree: d,
+            env: pluck(),
+        },
+    );
     a.commit(&ka, TOPIC, 3, MusicOp::RemoveDegree { degree: d });
     let v = a.view();
     assert!(!v.live.contains(&d), "degree retracted → not sounding");
@@ -257,25 +402,54 @@ fn tuning_switch_scopes_the_view_and_switching_back_resurrects() {
     let mut a: Store<MusicLang> = Store::new();
     let d12 = degree12(4);
     a.commit(&ka, TOPIC, 1, MusicOp::AddDegree { degree: d12 });
-    a.commit(&ka, TOPIC, 2, MusicOp::SetEnvelope { degree: d12, env: swell() });
+    a.commit(
+        &ka,
+        TOPIC,
+        2,
+        MusicOp::SetEnvelope {
+            degree: d12,
+            env: swell(),
+        },
+    );
     assert!(a.view().live.contains(&d12));
 
-    a.commit(&ka, TOPIC, 3, MusicOp::SetTuning { definition: edo31() });
+    a.commit(
+        &ka,
+        TOPIC,
+        3,
+        MusicOp::SetTuning {
+            definition: edo31(),
+        },
+    );
     let d31 = degree31(20);
     a.commit(&ka, TOPIC, 4, MusicOp::AddDegree { degree: d31 });
     let v = a.view();
     assert_eq!(v.tuning, edo31());
     assert!(!v.live.contains(&d12), "12-TET degree hidden under 31-EDO");
-    assert!(v.envelopes.get(&d12).is_none(), "its facet is scoped out too");
+    assert!(
+        !v.envelopes.contains_key(&d12),
+        "its facet is scoped out too"
+    );
     assert!(v.live.contains(&d31));
 
-    a.commit(&ka, TOPIC, 5, MusicOp::SetTuning {
-        definition: TuningDefinition::twelve_tet(),
-    });
+    a.commit(
+        &ka,
+        TOPIC,
+        5,
+        MusicOp::SetTuning {
+            definition: TuningDefinition::twelve_tet(),
+        },
+    );
     let v = a.view();
-    assert!(v.live.contains(&d12), "switching back resurrects the degree");
+    assert!(
+        v.live.contains(&d12),
+        "switching back resurrects the degree"
+    );
     assert_eq!(v.envelopes.get(&d12), Some(&swell()), "and its facet");
-    assert!(!v.live.contains(&d31), "the 31-EDO degree is scoped out now");
+    assert!(
+        !v.live.contains(&d31),
+        "the 31-EDO degree is scoped out now"
+    );
 }
 
 /// With no `SetTuning` in the log the view resolves to built-in 12-TET.
@@ -302,6 +476,7 @@ fn oversized_envelope_is_rejected_at_ingress() {
         1,
         TOPIC,
     );
-    let (signed, _) = tutti_core::sign_versioned_op(&ka, &tutti_core::LogHead::genesis(), versioned);
+    let (signed, _) =
+        tutti_core::sign_versioned_op(&ka, &tutti_core::LogHead::genesis(), versioned);
     assert!(verify_signed_op_in::<MusicLang>(&signed).is_err());
 }

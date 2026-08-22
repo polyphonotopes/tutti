@@ -4,11 +4,15 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97.1"
 
+[features]
+default = []
+# Bounded compatibility island for tutti's pre-Replica source-log consumers.
+# Capability-native peers use only the protocol vocabulary and never resolve
+# p2panda, the old HHHS git revision, or `tutti-core`.
+legacy-source-log = ["dep:tutti-core"]
+
 [dependencies]
-# The reconciling signed-op substrate: `OpLanguage`/`FoldCtx`/`Store`, the
-# `causal_maxima` retention combinator, and the `EntryHash`/`AuthorId` identities
-# this protocol folds over.
-tutti-core = { path = "../tutti-core" }
+tutti-core = { path = "../tutti-core", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 # TuningId — blake3 of the canonical tuning bytes. Pinned to walkie's exact rev so
@@ -19,3 +23,11 @@ blake3 = "=1.8.5"
 # compaction-equivalence suites — dev-only, production never names `hhhs`.
 [dev-dependencies]
 tutti-core = { path = "../tutti-core", features = ["test-support"] }
+
+[[test]]
+name = "convergence"
+required-features = ["legacy-source-log"]
+
+[[test]]
+name = "retain_equiv"
+required-features = ["legacy-source-log"]

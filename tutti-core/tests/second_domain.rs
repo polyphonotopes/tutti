@@ -26,11 +26,11 @@ use serde::{Deserialize, Serialize};
 // `tutti_core::EntryHash`; the `entry_hash_nameable_via_tutti_core` test pins it.
 use tutti_core::EntryHash;
 
+use tutti_core::{FoldCtx, SigningKey};
 use tutti_core::{
     LogHead, OpLanguage, OpVerifyError, SignedOp, SignedOpWireError, Store, VerifiedOpG,
     VersionedOpG, sign_versioned_op, signing_key_from_seed, verify_signed_op_in,
 };
-use tutti_core::{FoldCtx, SigningKey};
 
 // ===========================================================================
 // The second OpLanguage: a collaborative key/value register store. Zero music.
@@ -71,10 +71,10 @@ impl OpLanguage for KvLang {
         if key.is_empty() || key.len() > MAX_KEY_BYTES {
             return Err(format!("key must be 1..={MAX_KEY_BYTES} UTF-8 bytes"));
         }
-        if let KvOp::Set { val, .. } = op {
-            if val.len() > MAX_VAL_BYTES {
-                return Err(format!("value exceeds {MAX_VAL_BYTES} UTF-8 bytes"));
-            }
+        if let KvOp::Set { val, .. } = op
+            && val.len() > MAX_VAL_BYTES
+        {
+            return Err(format!("value exceeds {MAX_VAL_BYTES} UTF-8 bytes"));
         }
         Ok(())
     }
@@ -97,10 +97,10 @@ impl OpLanguage for KvLang {
 
         let mut view = BTreeMap::new();
         for (key, candidates) in &writes {
-            if let Some(winner) = ctx.resolve(candidates) {
-                if let KvOp::Set { val, .. } = ctx.decoded()[&winner].op() {
-                    view.insert(key.clone(), val.clone());
-                }
+            if let Some(winner) = ctx.resolve(candidates)
+                && let KvOp::Set { val, .. } = ctx.decoded()[&winner].op()
+            {
+                view.insert(key.clone(), val.clone());
                 // A `Del` winner supersedes: the key stays absent.
             }
         }
@@ -187,7 +187,11 @@ fn ingest_all(store: &mut Store<KvLang>, ops: &[SignedOp]) {
 /// so each op's `observed` frontier really links the other authors' ops (genuine
 /// cross-author causality, not independent per-author chains). Returns the signed
 /// bytes in causal-commit order plus the producer's own materialized view.
-fn build_op_set(seed: u64, authors: usize, count: usize) -> (Vec<SignedOp>, BTreeMap<String, String>) {
+fn build_op_set(
+    seed: u64,
+    authors: usize,
+    count: usize,
+) -> (Vec<SignedOp>, BTreeMap<String, String>) {
     let keys: Vec<SigningKey> = (0..authors).map(author_key).collect();
     let vocab = ["alpha", "beta", "gamma", "delta", "epsilon"];
     let mut store: Store<KvLang> = Store::new();
@@ -196,7 +200,7 @@ fn build_op_set(seed: u64, authors: usize, count: usize) -> (Vec<SignedOp>, BTre
     for step in 0..count {
         let key = &keys[rng.below(authors)];
         let slot = vocab[rng.below(vocab.len())].to_string();
-        let op = if rng.next_u64() % 4 == 0 {
+        let op = if rng.next_u64().is_multiple_of(4) {
             KvOp::Del { key: slot }
         } else {
             KvOp::Set {
@@ -267,14 +271,22 @@ fn determinism_over_permutations() {
     }
 
     for view in &views {
-        assert_eq!(view, &expected, "a permutation diverged from the producer view");
+        assert_eq!(
+            view, &expected,
+            "a permutation diverged from the producer view"
+        );
     }
     #[cfg(feature = "merkle")]
     for root in &roots {
-        assert_eq!(root, &roots[0], "a permutation produced a different ops_root");
+        assert_eq!(
+            root, &roots[0],
+            "a permutation produced a different ops_root"
+        );
     }
 
-    println!("PASS property 2 (determinism): 8 permutations -> identical view + identical ops_root");
+    println!(
+        "PASS property 2 (determinism): 8 permutations -> identical view + identical ops_root"
+    );
 }
 
 // ===========================================================================
@@ -293,7 +305,11 @@ fn ops_root_iff_entry_set() {
     ingest_all(&mut full_a, &shuffled(&ops, 41));
     ingest_all(&mut full_b, &shuffled(&ops, 42));
     assert_eq!(full_a.entry_hashes(), full_b.entry_hashes());
-    assert_eq!(full_a.ops_root(), full_b.ops_root(), "equal set must give equal root");
+    assert_eq!(
+        full_a.ops_root(),
+        full_b.ops_root(),
+        "equal set must give equal root"
+    );
 
     // Drop the causally-latest op (no dependents) -> the rest all lift, so the set
     // differs by exactly one entry, and the root MUST differ.
@@ -302,10 +318,18 @@ fn ops_root_iff_entry_set() {
         ingest_all(&mut s, &shuffled(&ops[..ops.len() - 1], 43));
         s
     };
-    assert_eq!(subset.pending_len(), 0, "dropping the latest op should not park the rest");
+    assert_eq!(
+        subset.pending_len(),
+        0,
+        "dropping the latest op should not park the rest"
+    );
     assert_eq!(subset.entry_hashes().len(), full_a.entry_hashes().len() - 1);
     assert_ne!(subset.entry_hashes(), full_a.entry_hashes());
-    assert_ne!(subset.ops_root(), full_a.ops_root(), "different set must give different root");
+    assert_ne!(
+        subset.ops_root(),
+        full_a.ops_root(),
+        "different set must give different root"
+    );
 
     // sync_root (the weaker digest) tracks the same identity set: same predicate.
     assert_eq!(full_a.sync_root(), full_b.sync_root());
@@ -326,31 +350,54 @@ fn deferral_parks_then_lifts_on_backfill() {
     let ka = author_key(0);
     let kb = author_key(1);
     let mut producer: Store<KvLang> = Store::new();
-    let signed_a = producer.commit(&ka, TOPIC, TS_BASE, KvOp::Set {
-        key: "alpha".into(),
-        val: "1".into(),
-    });
-    let signed_b = producer.commit(&kb, TOPIC, TS_BASE + 1, KvOp::Set {
-        key: "beta".into(),
-        val: "2".into(),
-    });
+    let signed_a = producer.commit(
+        &ka,
+        TOPIC,
+        TS_BASE,
+        KvOp::Set {
+            key: "alpha".into(),
+            val: "1".into(),
+        },
+    );
+    let signed_b = producer.commit(
+        &kb,
+        TOPIC,
+        TS_BASE + 1,
+        KvOp::Set {
+            key: "beta".into(),
+            val: "2".into(),
+        },
+    );
 
     let vb = verify_signed_op_in::<KvLang>(&signed_b).expect("b verifies");
-    assert!(!vb.observed().is_empty(), "B must observe A for this to test deferral");
+    assert!(
+        !vb.observed().is_empty(),
+        "B must observe A for this to test deferral"
+    );
 
     // Ingest B FIRST: its `observed` references A, which is not lifted -> it PARKS.
     let mut store: Store<KvLang> = Store::new();
     let lifted = store.ingest_verified(vb);
-    assert!(lifted.is_empty(), "B must park (its causal past is incomplete)");
+    assert!(
+        lifted.is_empty(),
+        "B must park (its causal past is incomplete)"
+    );
     assert_eq!(store.pending_len(), 1);
-    assert!(store.entry_hashes().is_empty(), "a parked op is not materialized");
+    assert!(
+        store.entry_hashes().is_empty(),
+        "a parked op is not materialized"
+    );
     assert!(store.view().is_empty());
 
     // Backfill A: A lifts, and the drain immediately unblocks B.
     let va = verify_signed_op_in::<KvLang>(&signed_a).expect("a verifies");
     let lifted = store.ingest_verified(va);
     assert_eq!(lifted.len(), 2, "ingesting A lifts A and drains B");
-    assert_eq!(store.pending_len(), 0, "liveness: nothing stuck after backfill");
+    assert_eq!(
+        store.pending_len(),
+        0,
+        "liveness: nothing stuck after backfill"
+    );
     assert_eq!(store.entry_hashes().len(), 2);
     assert_eq!(store.view(), producer.view());
     assert_eq!(
@@ -370,10 +417,15 @@ fn deferral_parks_then_lifts_on_backfill() {
 fn sign_frame_verify_and_tamper() {
     let ka = author_key(0);
     let mut store: Store<KvLang> = Store::new();
-    let signed = store.commit(&ka, TOPIC, TS_BASE, KvOp::Set {
-        key: "greeting".into(),
-        val: "hello".into(),
-    });
+    let signed = store.commit(
+        &ka,
+        TOPIC,
+        TS_BASE,
+        KvOp::Set {
+            key: "greeting".into(),
+            val: "hello".into(),
+        },
+    );
 
     // Framing round-trips losslessly through the length-delimited wire frame.
     let wire = signed.to_wire_bytes().expect("frames");
@@ -384,7 +436,10 @@ fn sign_frame_verify_and_tamper() {
     let verified = verify_signed_op_in::<KvLang>(&recovered).expect("verifies");
     assert_eq!(
         verified.payload(),
-        &KvOp::Set { key: "greeting".into(), val: "hello".into() },
+        &KvOp::Set {
+            key: "greeting".into(),
+            val: "hello".into()
+        },
     );
     assert_eq!(verified.topic(), Some(TOPIC));
 
@@ -399,12 +454,20 @@ fn sign_frame_verify_and_tamper() {
 
     // Domain well-formedness runs at ingress: an empty key is rejected by
     // KvLang::validate_wire (signed via prepare_commit, which does not pre-validate).
-    let bad = store.prepare_commit(&ka, TOPIC, TS_BASE + 1, KvOp::Set {
-        key: String::new(),
-        val: "x".into(),
-    });
+    let bad = store.prepare_commit(
+        &ka,
+        TOPIC,
+        TS_BASE + 1,
+        KvOp::Set {
+            key: String::new(),
+            val: "x".into(),
+        },
+    );
     assert!(
-        matches!(verify_signed_op_in::<KvLang>(&bad), Err(OpVerifyError::InvalidDomain(_))),
+        matches!(
+            verify_signed_op_in::<KvLang>(&bad),
+            Err(OpVerifyError::InvalidDomain(_))
+        ),
         "empty key must fail validate_wire",
     );
 
@@ -422,10 +485,15 @@ fn sign_frame_verify_and_tamper() {
 fn cross_domain_frames_refuse_each_other() {
     let ka = author_key(0);
     let mut store: Store<KvLang> = Store::new();
-    let signed = store.commit(&ka, TOPIC, TS_BASE, KvOp::Set {
-        key: "greeting".into(),
-        val: "hello".into(),
-    });
+    let signed = store.commit(
+        &ka,
+        TOPIC,
+        TS_BASE,
+        KvOp::Set {
+            key: "greeting".into(),
+            val: "hello".into(),
+        },
+    );
 
     // A KvLang-tagged frame round-trips through KvLang's own deframe...
     let kv_framed = signed.to_wire_bytes_in::<KvLang>().expect("kv frames");
@@ -441,7 +509,9 @@ fn cross_domain_frames_refuse_each_other() {
     );
 
     // Vice-versa: an OtherLang(=walkie-magic) frame is refused by KvLang's deframe.
-    let other_framed = signed.to_wire_bytes_in::<OtherLang>().expect("other frames");
+    let other_framed = signed
+        .to_wire_bytes_in::<OtherLang>()
+        .expect("other frames");
     assert_eq!(
         SignedOp::from_wire_bytes_in::<KvLang>(&other_framed),
         Err(SignedOpWireError::WrongDomain),
@@ -476,7 +546,10 @@ fn kv_frame_and_verify_share_the_payload_ceiling() {
     // does NOT run `validate_wire`, so an oversize value can be constructed here.
     let big_val = "x".repeat(200 * 1024);
     let versioned = VersionedOpG::<KvLang>::current_for_topic(
-        KvOp::Set { key: "k".into(), val: big_val },
+        KvOp::Set {
+            key: "k".into(),
+            val: big_val,
+        },
         TS_BASE,
         TOPIC,
     );

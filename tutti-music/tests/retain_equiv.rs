@@ -6,8 +6,9 @@
 //! tuning-register flips. If the retention rule dropped anything a future fold
 //! could still see, some shuffle here diverges.
 
-
-use tutti_core::{SignedOp, Store, VerifiedOpG, WindowedStore, signing_key_from_seed, verify_signed_op_in};
+use tutti_core::{
+    SignedOp, Store, VerifiedOpG, WindowedStore, signing_key_from_seed, verify_signed_op_in,
+};
 use tutti_music::tuning::{TunedDegree, Tuning, TuningDefinition};
 use tutti_music::{Envelope, Interp, MusicLang, MusicOp};
 
@@ -18,8 +19,11 @@ fn edo31() -> TuningDefinition {
     for step in 1..=31 {
         scl.push_str(&format!("{:.6}\n", f64::from(step) * 1200.0 / 31.0));
     }
-    TuningDefinition::new(scl, Some("0\n0\n127\n60\n60\n261.6255653005986\n0\n".to_owned()))
-        .expect("valid 31-EDO")
+    TuningDefinition::new(
+        scl,
+        Some("0\n0\n127\n60\n60\n261.6255653005986\n0\n".to_owned()),
+    )
+    .expect("valid 31-EDO")
 }
 
 fn degree31(pc: u16) -> TunedDegree {
@@ -33,7 +37,11 @@ fn degree12(pc: u16) -> TunedDegree {
 fn env(seed: u8) -> Envelope {
     Envelope {
         points: vec![(0, 8 + seed % 100), (200, 127 - seed % 50), (40, 0)],
-        interp: if seed % 2 == 0 { Interp::Linear } else { Interp::Exp },
+        interp: if seed.is_multiple_of(2) {
+            Interp::Linear
+        } else {
+            Interp::Exp
+        },
     }
 }
 
@@ -87,57 +95,164 @@ fn adversarial_ops() -> Vec<SignedOp> {
     };
 
     // A establishes the room and a first generation of degrees + facets.
-    ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::SetTuning { definition: edo31() }));
+    ops.push(a.commit(
+        &ka,
+        TOPIC,
+        tick(),
+        MusicOp::SetTuning {
+            definition: edo31(),
+        },
+    ));
     for pc in [0u16, 5, 10, 18] {
-        ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::AddDegree { degree: degree31(pc) }));
-        ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::SetEnvelope {
-            degree: degree31(pc),
-            env: env(pc as u8),
-        }));
+        ops.push(a.commit(
+            &ka,
+            TOPIC,
+            tick(),
+            MusicOp::AddDegree {
+                degree: degree31(pc),
+            },
+        ));
+        ops.push(a.commit(
+            &ka,
+            TOPIC,
+            tick(),
+            MusicOp::SetEnvelope {
+                degree: degree31(pc),
+                env: env(pc as u8),
+            },
+        ));
     }
     exchange(&ops, &mut b);
 
     // B observes all of A: kills one degree, supersedes a facet, adds its own,
     // and flips the room to 12-TET.
     let b_start = ops.len();
-    ops.push(b.commit(&kb, TOPIC, tick(), MusicOp::RemoveDegree { degree: degree31(5) }));
-    ops.push(b.commit(&kb, TOPIC, tick(), MusicOp::SetEnvelope {
-        degree: degree31(0),
-        env: env(101),
-    }));
-    ops.push(b.commit(&kb, TOPIC, tick(), MusicOp::AddDegree { degree: degree31(25) }));
-    ops.push(b.commit(&kb, TOPIC, tick(), MusicOp::SetTuning {
-        definition: TuningDefinition::twelve_tet(),
-    }));
-    ops.push(b.commit(&kb, TOPIC, tick(), MusicOp::AddDegree { degree: degree12(4) }));
+    ops.push(b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::RemoveDegree {
+            degree: degree31(5),
+        },
+    ));
+    ops.push(b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::SetEnvelope {
+            degree: degree31(0),
+            env: env(101),
+        },
+    ));
+    ops.push(b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::AddDegree {
+            degree: degree31(25),
+        },
+    ));
+    ops.push(b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::SetTuning {
+            definition: TuningDefinition::twelve_tet(),
+        },
+    ));
+    ops.push(b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::AddDegree {
+            degree: degree12(4),
+        },
+    ));
     exchange(&ops[b_start..], &mut a);
 
     // A observes all of B: resurrects the killed degree, supersedes facets
     // again, churns a 12-TET degree through add→remove, flips back to 31-EDO.
     let a_start = ops.len();
-    ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::AddDegree { degree: degree31(5) }));
-    ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::SetEnvelope {
-        degree: degree31(0),
-        env: env(102),
-    }));
-    ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::SetEnvelope {
-        degree: degree31(10),
-        env: env(103),
-    }));
-    ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::AddDegree { degree: degree12(7) }));
-    ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::RemoveDegree { degree: degree12(7) }));
-    ops.push(a.commit(&ka, TOPIC, tick(), MusicOp::SetTuning { definition: edo31() }));
+    ops.push(a.commit(
+        &ka,
+        TOPIC,
+        tick(),
+        MusicOp::AddDegree {
+            degree: degree31(5),
+        },
+    ));
+    ops.push(a.commit(
+        &ka,
+        TOPIC,
+        tick(),
+        MusicOp::SetEnvelope {
+            degree: degree31(0),
+            env: env(102),
+        },
+    ));
+    ops.push(a.commit(
+        &ka,
+        TOPIC,
+        tick(),
+        MusicOp::SetEnvelope {
+            degree: degree31(10),
+            env: env(103),
+        },
+    ));
+    ops.push(a.commit(
+        &ka,
+        TOPIC,
+        tick(),
+        MusicOp::AddDegree {
+            degree: degree12(7),
+        },
+    ));
+    ops.push(a.commit(
+        &ka,
+        TOPIC,
+        tick(),
+        MusicOp::RemoveDegree {
+            degree: degree12(7),
+        },
+    ));
+    ops.push(a.commit(
+        &ka,
+        TOPIC,
+        tick(),
+        MusicOp::SetTuning {
+            definition: edo31(),
+        },
+    ));
     exchange(&ops[a_start..], &mut b);
 
     // B: a final generation — remove a long-lived degree (its facet persists),
     // one more superseding facet write, one more add.
     let b2_start = ops.len();
-    ops.push(b.commit(&kb, TOPIC, tick(), MusicOp::RemoveDegree { degree: degree31(10) }));
-    ops.push(b.commit(&kb, TOPIC, tick(), MusicOp::SetEnvelope {
-        degree: degree31(18),
-        env: env(104),
-    }));
-    ops.push(b.commit(&kb, TOPIC, tick(), MusicOp::AddDegree { degree: degree31(2) }));
+    ops.push(b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::RemoveDegree {
+            degree: degree31(10),
+        },
+    ));
+    ops.push(b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::SetEnvelope {
+            degree: degree31(18),
+            env: env(104),
+        },
+    ));
+    ops.push(b.commit(
+        &kb,
+        TOPIC,
+        tick(),
+        MusicOp::AddDegree {
+            degree: degree31(2),
+        },
+    ));
     exchange(&ops[b2_start..], &mut a);
 
     assert_eq!(a.view(), b.view(), "the producers themselves converge");
@@ -170,7 +285,7 @@ fn compacting_window_folds_identically_to_full_history() {
         for (i, signed) in arrival.iter().enumerate() {
             full.ingest_verified(verify(signed));
             windowed.ingest_verified(verify(signed));
-            if rng.next() % 3 == 0 {
+            if rng.next().is_multiple_of(3) {
                 windowed.compact();
             }
             assert_eq!(
@@ -180,9 +295,21 @@ fn compacting_window_folds_identically_to_full_history() {
             );
         }
         windowed.compact();
-        assert_eq!(windowed.view(), full.view(), "seed {seed}: final views differ");
-        assert_eq!(full.view(), full.view_reference(), "seed {seed}: lazy != oracle");
-        assert_eq!(full.view(), reference, "seed {seed}: diverged from reference");
+        assert_eq!(
+            windowed.view(),
+            full.view(),
+            "seed {seed}: final views differ"
+        );
+        assert_eq!(
+            full.view(),
+            full.view_reference(),
+            "seed {seed}: lazy != oracle"
+        );
+        assert_eq!(
+            full.view(),
+            reference,
+            "seed {seed}: diverged from reference"
+        );
         assert_eq!(windowed.pending_len(), 0, "seed {seed}: ops parked");
         discarded_somewhere |= windowed.total_discarded() > 0;
     }
@@ -217,7 +344,14 @@ fn compaction_discards_superseded_history_but_preserves_the_view() {
     // (a fresh author's add of a degree that was removed) still folds right.
     let kc = signing_key_from_seed(&[83u8; 32]);
     let mut c: Store<MusicLang> = Store::new();
-    let late = c.commit(&kc, TOPIC, 999, MusicOp::AddDegree { degree: degree31(10) });
+    let late = c.commit(
+        &kc,
+        TOPIC,
+        999,
+        MusicOp::AddDegree {
+            degree: degree31(10),
+        },
+    );
     let mut full2 = ingest_full(&ops);
     full2.ingest_verified(verify(&late));
     windowed.ingest_verified(verify(&late));
