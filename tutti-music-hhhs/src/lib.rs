@@ -10,7 +10,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use hhhs::{DagRead, DagSnapshot, Digest, Entry, EntryHash, Position, ReachIndex};
+use hhhs::{
+    DagRead, DagSnapshot, Digest, Entry, EntryHash, LazyReach, Position, Reach, ReachIndex,
+    WalkingReach,
+};
 use hhhs_cap::{
     Area, AuthorizationDecision, AuthorizationRequest, CapabilityOp, CapabilitySnapshot, Grant,
     Receiver, Right, Rights, decode_op as decode_capability, encode_op as encode_capability,
@@ -321,8 +324,8 @@ pub fn author<S: ReplicaStorage + 'static>(
     replica.author_ed25519(payload, area, Right::Invoke, presented, key)
 }
 
-fn currently_authorized(
-    capabilities: &CapabilitySnapshot,
+fn currently_authorized<R: Reach>(
+    capabilities: &CapabilitySnapshot<R>,
     history: &DagSnapshot,
     entry: EntryHash,
     envelope: &CommandEnvelope,
@@ -344,7 +347,11 @@ fn currently_authorized(
 }
 
 pub fn commands(history: &DagSnapshot, roots: &[EntryHash]) -> Vec<(EntryHash, ActorId, MusicOp)> {
-    let capabilities = CapabilitySnapshot::capture(history, roots.iter().copied());
+    let capabilities = CapabilitySnapshot::<LazyReach>::capture_with(
+        history,
+        roots.iter().copied(),
+        LazyReach::new,
+    );
     history
         .entries_topo()
         .into_iter()
@@ -360,13 +367,24 @@ pub fn commands(history: &DagSnapshot, roots: &[EntryHash]) -> Vec<(EntryHash, A
         .collect()
 }
 
-fn resolve_register<T>(reach: &ReachIndex, values: Vec<(EntryHash, T)>) -> Option<T> {
-    let ids: Vec<_> = values.iter().map(|(id, _)| *id).collect();
-    let winner = ids
-        .iter()
-        .filter(|candidate| !ids.iter().any(|other| reach.is_ancestor(candidate, other)))
-        .max()
-        .copied()?;
+/// Advance causal maxima while consuming entries in topological order.
+///
+/// Any existing candidate in the new entry's past has been superseded. The
+/// remaining candidates are concurrent with the new one, so retaining only
+/// these maxima bounds common-case work by actual concurrency instead of total
+/// retained history.
+fn advance_maxima<T, R: Reach>(
+    reach: &R,
+    maxima: &mut Vec<(EntryHash, T)>,
+    id: EntryHash,
+    value: T,
+) {
+    maxima.retain(|(candidate, _)| !reach.is_ancestor(candidate, &id));
+    maxima.push((id, value));
+}
+
+fn resolve_maxima<T>(values: Vec<(EntryHash, T)>) -> Option<T> {
+    let winner = values.iter().map(|(id, _)| *id).max()?;
     values
         .into_iter()
         .find_map(|(id, value)| (id == winner).then_some(value))
@@ -393,18 +411,21 @@ impl Default for MusicView {
 
 pub fn materialize(history: &DagSnapshot, roots: &[EntryHash]) -> MusicView {
     let commands = commands(history, roots);
-    let reach = ReachIndex::new(history);
-    let tuning = resolve_register(
-        &reach,
-        commands
-            .iter()
-            .filter_map(|(id, _, command)| match command {
-                MusicOp::SetTuning { definition } => Some((*id, definition.clone())),
-                _ => None,
-            })
-            .collect(),
-    )
-    .unwrap_or_else(TuningDefinition::twelve_tet);
+    materialize_commands(history, &commands)
+}
+
+fn materialize_commands(
+    history: &DagSnapshot,
+    commands: &[(EntryHash, ActorId, MusicOp)],
+) -> MusicView {
+    let reach = WalkingReach::new(history);
+    let mut tuning_maxima = Vec::new();
+    for (id, _, command) in commands {
+        if let MusicOp::SetTuning { definition } = command {
+            advance_maxima(&reach, &mut tuning_maxima, *id, definition.clone());
+        }
+    }
+    let tuning = resolve_maxima(tuning_maxima).unwrap_or_else(TuningDefinition::twelve_tet);
     let Ok(active) = tuning.validate("active music Replica tuning") else {
         return MusicView {
             tuning,
@@ -412,43 +433,41 @@ pub fn materialize(history: &DagSnapshot, roots: &[EntryHash]) -> MusicView {
         };
     };
 
-    let mut live = BTreeSet::new();
-    let mut holders: BTreeMap<TunedDegree, BTreeSet<ActorId>> = BTreeMap::new();
-    for (add, actor, degree) in commands.iter().filter_map(|(id, actor, command)| {
-        let MusicOp::AddDegree { degree } = command else {
-            return None;
-        };
-        degree
-            .validate(&active)
-            .ok()
-            .map(|degree| (*id, *actor, degree))
-    }) {
-        let killed = commands.iter().any(|(remove, _, command)| {
-            matches!(command, MusicOp::RemoveDegree { degree: removed } if *removed == degree)
-                && reach.is_ancestor(&add, remove)
-        });
-        if !killed {
-            live.insert(degree);
-            holders.entry(degree).or_default().insert(actor);
+    let mut live_adds: BTreeMap<TunedDegree, Vec<(EntryHash, ActorId)>> = BTreeMap::new();
+    let mut envelope_maxima: BTreeMap<TunedDegree, Vec<(EntryHash, Envelope)>> = BTreeMap::new();
+    for (id, actor, command) in commands {
+        match command {
+            MusicOp::AddDegree { degree } if degree.validate(&active).is_ok() => {
+                live_adds.entry(*degree).or_default().push((*id, *actor));
+            }
+            MusicOp::RemoveDegree { degree } => {
+                if let Some(adds) = live_adds.get_mut(degree) {
+                    adds.retain(|(add, _)| !reach.is_ancestor(add, id));
+                }
+            }
+            MusicOp::SetEnvelope { degree, env } if degree.validate(&active).is_ok() => {
+                advance_maxima(
+                    &reach,
+                    envelope_maxima.entry(*degree).or_default(),
+                    *id,
+                    env.clone(),
+                );
+            }
+            _ => {}
         }
     }
 
-    let mut envelope_slots: BTreeMap<TunedDegree, Vec<(EntryHash, Envelope)>> = BTreeMap::new();
-    for (id, _, command) in &commands {
-        if let MusicOp::SetEnvelope { degree, env } = command
-            && degree.validate(&active).is_ok()
-        {
-            envelope_slots
-                .entry(*degree)
-                .or_default()
-                .push((*id, env.clone()));
+    let mut live = BTreeSet::new();
+    let mut holders = BTreeMap::new();
+    for (degree, adds) in live_adds {
+        if !adds.is_empty() {
+            live.insert(degree);
+            holders.insert(degree, adds.into_iter().map(|(_, actor)| actor).collect());
         }
     }
-    let envelopes = envelope_slots
+    let envelopes = envelope_maxima
         .into_iter()
-        .filter_map(|(degree, values)| {
-            resolve_register(&reach, values).map(|value| (degree, value))
-        })
+        .filter_map(|(degree, values)| resolve_maxima(values).map(|value| (degree, value)))
         .collect();
     MusicView {
         live,
@@ -568,6 +587,105 @@ mod tests {
 
     use super::*;
 
+    fn resolve_reference<T>(reach: &ReachIndex, values: Vec<(EntryHash, T)>) -> Option<T> {
+        let ids: Vec<_> = values.iter().map(|(id, _)| *id).collect();
+        let winner = ids
+            .iter()
+            .filter(|candidate| !ids.iter().any(|other| reach.is_ancestor(candidate, other)))
+            .max()
+            .copied()?;
+        values
+            .into_iter()
+            .find_map(|(id, value)| (id == winner).then_some(value))
+    }
+
+    /// The pre-optimization all-pairs fold, kept only as a semantic oracle.
+    fn materialize_reference(
+        history: &DagSnapshot,
+        commands: &[(EntryHash, ActorId, MusicOp)],
+    ) -> MusicView {
+        let reach = ReachIndex::new(history);
+        let tuning = resolve_reference(
+            &reach,
+            commands
+                .iter()
+                .filter_map(|(id, _, command)| match command {
+                    MusicOp::SetTuning { definition } => Some((*id, definition.clone())),
+                    _ => None,
+                })
+                .collect(),
+        )
+        .unwrap_or_else(TuningDefinition::twelve_tet);
+        let Ok(active) = tuning.validate("reference tuning") else {
+            return MusicView {
+                tuning,
+                ..MusicView::default()
+            };
+        };
+
+        let mut live = BTreeSet::new();
+        let mut holders: BTreeMap<TunedDegree, BTreeSet<ActorId>> = BTreeMap::new();
+        for (add, actor, degree) in commands.iter().filter_map(|(id, actor, command)| {
+            let MusicOp::AddDegree { degree } = command else {
+                return None;
+            };
+            degree
+                .validate(&active)
+                .ok()
+                .map(|degree| (*id, *actor, degree))
+        }) {
+            let killed = commands.iter().any(|(remove, _, command)| {
+                matches!(command, MusicOp::RemoveDegree { degree: removed } if *removed == degree)
+                    && reach.is_ancestor(&add, remove)
+            });
+            if !killed {
+                live.insert(degree);
+                holders.entry(degree).or_default().insert(actor);
+            }
+        }
+
+        let mut envelope_slots: BTreeMap<TunedDegree, Vec<(EntryHash, Envelope)>> = BTreeMap::new();
+        for (id, _, command) in commands {
+            if let MusicOp::SetEnvelope { degree, env } = command
+                && degree.validate(&active).is_ok()
+            {
+                envelope_slots
+                    .entry(*degree)
+                    .or_default()
+                    .push((*id, env.clone()));
+            }
+        }
+        let envelopes = envelope_slots
+            .into_iter()
+            .filter_map(|(degree, values)| {
+                resolve_reference(&reach, values).map(|value| (degree, value))
+            })
+            .collect();
+        MusicView {
+            live,
+            holders,
+            envelopes,
+            tuning,
+        }
+    }
+
+    fn topo_commands(
+        history: &DagSnapshot,
+        commands: BTreeMap<EntryHash, (ActorId, MusicOp)>,
+    ) -> Vec<(EntryHash, ActorId, MusicOp)> {
+        history
+            .entries_topo()
+            .into_iter()
+            .filter_map(|entry| {
+                let id = entry.hash();
+                commands
+                    .get(&id)
+                    .cloned()
+                    .map(|(actor, command)| (id, actor, command))
+            })
+            .collect()
+    }
+
     #[test]
     fn standalone_replica_authors_and_materializes_music() {
         let key = SigningKey::from_bytes(&[1; 32]);
@@ -614,5 +732,95 @@ mod tests {
         let view = materialize(&replica.snapshot().history, &[root]);
         assert_eq!(view.live, [degree].into());
         assert_eq!(view.holders[&degree], [member].into());
+    }
+
+    #[test]
+    fn sparse_fold_matches_reference_for_linear_history() {
+        let key = SigningKey::from_bytes(&[3; 32]);
+        let owner = ActorId::from_signing_key(&key);
+        let namespace = Digest::of(b"linear music fold equivalence");
+        let (replica, root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
+        let tuning = Tuning::twelve_tet();
+
+        for index in 0..48 {
+            let degree = TunedDegree::new(&tuning, (index / 2) % 12).unwrap();
+            let command = if index % 2 == 0 {
+                MusicOp::AddDegree { degree }
+            } else {
+                MusicOp::RemoveDegree { degree }
+            };
+            author(&replica, namespace, &key, vec![root], command).unwrap();
+        }
+
+        let history = replica.snapshot().history;
+        let commands = commands(&history, &[root]);
+        assert_eq!(
+            materialize_commands(&history, &commands),
+            materialize_reference(&history, &commands)
+        );
+    }
+
+    #[test]
+    fn sparse_fold_matches_reference_across_concurrent_add_remove_and_registers() {
+        let root = Entry::new(vec![0], Position::empty());
+        let left_add = Entry::new(vec![1], Position::of([root.hash()]));
+        let left_remove = Entry::new(vec![2], Position::of([left_add.hash()]));
+        let right_add = Entry::new(vec![3], Position::of([root.hash()]));
+        let left_envelope = Entry::new(vec![4], Position::of([left_add.hash()]));
+        let right_envelope = Entry::new(vec![5], Position::of([right_add.hash()]));
+        let entries = [
+            root,
+            left_add.clone(),
+            left_remove.clone(),
+            right_add.clone(),
+            left_envelope.clone(),
+            right_envelope.clone(),
+        ];
+        let history = DagSnapshot::from_entries(entries);
+        let degree = TunedDegree::new(&Tuning::twelve_tet(), 7).unwrap();
+        let left_actor = ActorId([4; 32]);
+        let right_actor = ActorId([5; 32]);
+        let mut by_entry = BTreeMap::new();
+        by_entry.insert(left_add.hash(), (left_actor, MusicOp::AddDegree { degree }));
+        by_entry.insert(
+            left_remove.hash(),
+            (left_actor, MusicOp::RemoveDegree { degree }),
+        );
+        by_entry.insert(
+            right_add.hash(),
+            (right_actor, MusicOp::AddDegree { degree }),
+        );
+        by_entry.insert(
+            left_envelope.hash(),
+            (
+                left_actor,
+                MusicOp::SetEnvelope {
+                    degree,
+                    env: Envelope {
+                        points: vec![(10, 40)],
+                        ..Envelope::default()
+                    },
+                },
+            ),
+        );
+        by_entry.insert(
+            right_envelope.hash(),
+            (
+                right_actor,
+                MusicOp::SetEnvelope {
+                    degree,
+                    env: Envelope {
+                        points: vec![(20, 80)],
+                        ..Envelope::default()
+                    },
+                },
+            ),
+        );
+        let commands = topo_commands(&history, by_entry);
+
+        let sparse = materialize_commands(&history, &commands);
+        assert_eq!(sparse, materialize_reference(&history, &commands));
+        assert_eq!(sparse.live, [degree].into());
+        assert_eq!(sparse.holders[&degree], [right_actor].into());
     }
 }

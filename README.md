@@ -2,8 +2,9 @@
 
 Tutti contains reusable music state and host adapters. Its HHHS 0.4 protocol
 layer is `tutti-music-hhhs`; networking remains an application concern. The
-current release uses the immutable HHHS v0.4.2 tag throughout, including the
-AMY leaf.
+`v0.4.4` uses the immutable HHHS `v0.4.3` tag throughout, including the AMY
+leaf. Its HHHS materializer keeps only live causal maxima with `WalkingReach`
+instead of constructing an eager transitive closure.
 
 ## Crates
 
