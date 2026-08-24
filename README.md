@@ -1,7 +1,8 @@
 # tutti
 
 Tutti contains reusable music state and host adapters. Its HHHS 0.4 protocol
-layer is `tutti-music-hhhs`; networking remains an application concern.
+layer is `tutti-music-hhhs`; networking remains an application concern. The
+current release candidate uses HHHS 0.4.2 throughout, including the AMY leaf.
 
 ## Crates
 
