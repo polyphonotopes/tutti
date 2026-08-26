@@ -124,8 +124,7 @@ pub trait OpLanguage: Sized + 'static {
 
     /// **M3.1 compaction retention** — the domain names, at a causally-closed cut,
     /// exactly which of the cut's ops it must keep as residue; the rest are
-    /// monotone-shadowed and may be discarded
-    /// (`docs/vision/windowed-store-design.md` §6.2 delta 2, §2.4-2.5).
+    /// monotone-shadowed and may be discarded.
     ///
     /// `cut` is the set of currently-retained entry hashes at a compaction point
     /// (causally closed by strict deferral). `ctx` folds over exactly that set with

@@ -1,5 +1,5 @@
-//! THE GATE for the continuous-envelope facet (docs/research/tutti-amy-esp32-leaf.md
-//! §4): **convergence of a continuous *function* drives audio.** This is the
+//! The acceptance gate for the continuous-envelope facet: **convergence of a
+//! continuous *function* drives audio.** This is the
 //! INTERPOLATION-axis analogue of `partition_rejoin.rs` — where that test proves a
 //! converging *pitch-set* sounds, this proves a converging per-degree *envelope
 //! register* shapes synthesis, verifiably and identically on every peer.

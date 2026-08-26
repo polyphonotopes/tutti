@@ -1,5 +1,4 @@
-//! The desktop-AMY tutti leaf acceptance test (experiment 1 of
-//! `docs/research/tutti-amy-esp32-leaf.md`): drive AMY from a REAL, converging
+//! The desktop-AMY tutti leaf acceptance test: drive AMY from a real, converging
 //! tutti fold and prove the partition/rejoin **no-stuck-notes** acceptance — the
 //! core thesis that verifiable eventually-consistent convergence produces audio.
 //!

@@ -45,7 +45,7 @@ hhhs = { version = "0.4.3", git = "https://gitlab.com/micahscopes/hhhs-rs.git", 
 # Ed25519 signing is deterministic and tutti-core never generates keys, so this is
 # a build requirement, not a runtime one. In walkie's graph fastrand already turns
 # it on; declaring it here keeps tutti-core's standalone wasm build green. (The
-# getrandom-0.3 backend is set by the workspace `.cargo/config.toml` rustflag.)
+# Current HHHS dependencies select their own getrandom-0.3 WASM support.)
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 
@@ -54,3 +54,19 @@ getrandom = { version = "0.2", features = ["js"] }
 # `test-support` feature. Production builds still name only `hhhs-dag`.
 [dev-dependencies]
 hhhs = { version = "0.4.3", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.3" }
+
+[[test]]
+name = "channel_algebra"
+required-features = ["test-support"]
+
+[[test]]
+name = "riffcat_lens"
+required-features = ["test-support"]
+
+[[test]]
+name = "second_domain"
+required-features = ["test-support"]
+
+[[test]]
+name = "windowed_equiv"
+required-features = ["test-support"]

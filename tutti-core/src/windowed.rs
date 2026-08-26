@@ -1,10 +1,9 @@
 //! [`WindowedStore<L>`] — the leaf-profile domain sibling of [`Store<L>`](crate::Store),
-//! plus its **M3.1 monotone-shadowing compaction** bookkeeping
-//! (`docs/vision/windowed-store-design.md` §7 "M3.0"/"M3.1", §6.1, §3, §2.4-2.6).
+//! plus its **M3.1 monotone-shadowing compaction** bookkeeping.
 //!
 //! The L-free machinery this store drives — the bounded-window
-//! [`WindowedDag`](hhhs_dag::WindowedDag), its [`WindowedReach`](hhhs_dag::WindowedReach)
-//! backend, and the bounded [`PackedSummary`](hhhs_dag::PackedSummary) ancestry summary
+//! [`WindowedDag`], its [`WindowedReach`]
+//! backend, and the bounded [`PackedSummary`] ancestry summary
 //! — lives in the floor (`hhhs_dag::windowed`). What stays here is the `L`-threaded
 //! half: lift / strict-deferral / drain over signed ops, the cut-scoped sync surface,
 //! the fenced [`WindowedStore::view`], and compaction driven by [`OpLanguage::retain`].
@@ -23,7 +22,7 @@
 //! fold is not yet **monotone-shadowed** (§2.4): killed by an unconditional remove, or
 //! superseded by a retained later write; never dependent on the continued *absence* of
 //! a future op. Everything else is discarded from the fold's decoded map (the
-//! [`Checkpoint`]-tracked ancestry summary answers `is_ancestor` across the cut
+//! `Checkpoint`-tracked ancestry summary answers `is_ancestor` across the cut
 //! exactly, §3.2/§3.4), so `L::fold` over `checkpoint ⊕ window` equals the full-history
 //! fold for `N > W` (§2.6) — *iff* the domain's retention is sound, which the
 //! `windowed_equiv` gate falsifies adversarially. The [`WindowedStore::view`] fence
@@ -39,7 +38,7 @@
 //! retain").
 //!
 //! **M3.2 — bounded ancestry packing.** The frozen ancestry summary the checkpoint
-//! carries across the cut is the floor's [`PackedSummary`](hhhs_dag::PackedSummary):
+//! carries across the cut is the floor's [`PackedSummary`]:
 //! one dense retained-ancestor bitset closure, `O((|R|+|window|)²)` bits — **independent
 //! of total history N**, so the store's *memory* is bounded to the leaf budget (§5),
 //! not just its fold input.
@@ -195,9 +194,8 @@ impl DiscardHistory {
     }
 }
 
-/// The **checkpoint** a compacted [`WindowedStore`] carries across the cut
-/// (`docs/vision/windowed-store-design.md` §2.2). Present iff the store was built for
-/// compaction ([`WindowedStore::with_window`]).
+/// The **checkpoint** a compacted [`WindowedStore`] carries across the cut. Present
+/// iff the store was built for compaction ([`WindowedStore::with_window`]).
 ///
 /// The checkpoint's job is to let the *unchanged* `L::fold` run over a **shrunken
 /// decoded map** (residue ∪ window — the monotone-shadowed ops discarded, §2.5) while
@@ -338,7 +336,7 @@ impl std::error::Error for DeferredLiftError {}
 /// [`WindowedStore::view`], and a cut-scoped sync surface (§1.2, §4.2).
 ///
 /// It is **byte-compatible by construction** with [`Store<L>`](crate::Store): it lifts
-/// through the identical [`frame_signed`] framing, so the same op yields the same
+/// through the identical `frame_signed` framing, so the same op yields the same
 /// [`EntryHash`] on a windowed leaf and a full peer — the precondition for
 /// convergence (§4.1). While `N ≤ W` its retained set equals a full store's, so
 /// `entry_hashes`, `sync_root`, `ops_root` and, above all, `view()` all match a
@@ -729,8 +727,8 @@ impl<L: OpLanguage> WindowedStore<L> {
         }
     }
 
-    /// **M3.2 — compact at the current frontier** (`windowed-store-design.md`
-    /// §2.4-2.5). A no-op on the M3.0 profile (returns zero discards).
+    /// **M3.2 — compact at the current frontier.** A no-op on the M3.0 profile
+    /// (returns zero discards).
     ///
     /// The cut `C` is the whole currently-retained set (causally closed by strict
     /// deferral, §2.1). The domain's [`OpLanguage::retain`] names the residue
@@ -1045,7 +1043,7 @@ impl<L: OpLanguage> WindowedStore<L> {
     }
 
     /// The bounded-window [`DagDelta::appended_since`](hhhs_dag::DagDelta) contract,
-    /// forwarded from the backing [`WindowedDag`](hhhs_dag::WindowedDag): `Some` inside
+    /// forwarded from the backing [`WindowedDag`]: `Some` inside
     /// the window, `None` past its boundary (§1.3, §7).
     pub fn appended_since(&self, since: GrowthEpoch) -> Option<Vec<Entry>> {
         self.dag.appended_since(since)
@@ -1081,8 +1079,7 @@ impl<L: OpLanguage> WindowedStore<L> {
             self.is_answerable(),
             "windowed view fence: the window hard-truncated (N > W) with no compaction \
              to account for the dropped ops. A fold over it would silently mis-answer \
-             is_ancestor across the cut (a wrong view, not an error — \
-             windowed-store-design.md §1.3, §6.2 delta 6). Build the store with \
+             is_ancestor across the cut (a wrong view, not an error). Build the store with \
              `with_window` (M3.1 compaction) to fold past W.",
         );
         match self.checkpoint.as_ref() {
@@ -1185,7 +1182,7 @@ impl<L: OpLanguage> WindowedStore<L> {
         }
         assert!(
             self.dag.is_complete(),
-            "windowed view_reference fence: truncated window (windowed-store-design.md §1.3)",
+            "windowed view_reference fence: truncated window",
         );
         let snapshot = self.dag.snapshot();
         let reach = ReachIndex::new(&snapshot);

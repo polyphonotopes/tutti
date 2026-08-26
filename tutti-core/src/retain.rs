@@ -1,6 +1,5 @@
 //! M3.1 retention combinators — the shadowing-lemma primitives a domain composes
-//! into its [`OpLanguage::retain`](crate::OpLanguage::retain), beside the way it
-//! composes its fold (`docs/vision/windowed-store-design.md` §2.5, §6.2 delta 3).
+//! into its [`OpLanguage::retain`], beside the way it composes its fold.
 //!
 //! Every combinator here is a pure function of a [`FoldCtx`]'s ancestry surface
 //! (`is_ancestor` / `resolve`), so a domain's retention reasons over the *same*
@@ -22,8 +21,8 @@ use crate::store::FoldCtx;
 
 /// The **causal maxima** of `candidates`: the members with no *other* candidate as a
 /// strict causal descendant — an antichain, the currently-winning ops
-/// (`docs/vision/windowed-store-design.md` §2.5, the shared kernel of Lemma R and
-/// Lemma A3). This is the register-supersession primitive (per slot) and the
+/// (the shared kernel of the register- and survivor-retention arguments). This is
+/// the register-supersession primitive (per slot) and the
 /// survivor-dominance primitive (per key-per-author) both.
 ///
 /// *Why maxima retention is sound (Lemma R / A3, sketch).* If `d < m` (strict

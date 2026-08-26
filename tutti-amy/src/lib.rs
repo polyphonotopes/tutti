@@ -10,8 +10,7 @@
 //!    strings: [`degrees_to_amy_events`] (state diff → note-on/off, offs before
 //!    ons) and [`envelope_to_amy`] (an [`Envelope`] facet → AMY's amplitude-EG
 //!    breakpoint fragment). AMY is a render target; the shared object stays the
-//!    pitch-set — "reconciliation upstream, events downstream"
-//!    (docs/research/tutti-amy-esp32-leaf.md §3.1).
+//!    pitch-set — "reconciliation upstream, events downstream."
 //!
 //! The music values live in `tutti-music`; capability admission,
 //! materialization, and repair live in `tutti-music-hhhs`. This crate only
@@ -32,8 +31,7 @@ use tutti_music::tuning::{PeriodicPitch, TunedDegree, Tuning};
 /// crate's callers keep their `tutti_amy::Envelope` spellings.
 pub use tutti_music::facets::{Envelope, Interp, MAX_ENV_LEVEL, MAX_ENV_POINTS};
 
-/// The two-peer partition→rejoin scenario + AMY driver over HHHS music Replicas
-/// (docs/research/tutti-amy-esp32-leaf.md, experiment 1).
+/// The two-peer partition→rejoin scenario and AMY driver over HHHS music Replicas.
 pub mod music;
 
 mod ffi {
@@ -128,7 +126,7 @@ pub fn sample_rate() -> usize {
     unsafe { ffi::ws_amy_sample_rate() as usize }
 }
 
-/// Root-mean-square level of a block, normalized to [0,1] against full scale.
+/// Root-mean-square level of a block, normalized to `0..=1` against full scale.
 pub fn rms(block: &[i16]) -> f64 {
     if block.is_empty() {
         return 0.0;
@@ -243,12 +241,14 @@ pub fn degrees_to_amy_events(
 // between the points — and AMY evaluates it at 44.1 kHz locally. AMY's control
 // model is already "generators, not streams": each oscillator has two
 // breakpoint envelope generators (EG0/EG1), `(time_ms, value)` pairs with a
-// per-EG interpolation `eg_type` (amy.h:238-242; docs/api.md `A`/`T`). The
+// per-EG interpolation `eg_type` (`amy.h:238-242`; upstream AMY
+// `${AMY_SRC}/docs/api.md`, `A`/`T`). The
 // default oscillator gates its amplitude by EG0 (amy.c:868), so an EG0
 // breakpoint string shapes the note's loudness contour directly.
 
-/// AMY's `eg_type` code (docs/api.md `T`) for an interpolation kind. `Step`
-/// rides the LINEAR engine (its staircase makes the curve piecewise-constant).
+/// AMY's `eg_type` code (upstream AMY `docs/api.md`, `T`) for an interpolation
+/// kind. `Step` rides the LINEAR engine (its staircase makes the curve
+/// piecewise-constant).
 fn eg_type_code(interp: Interp) -> u8 {
     match interp {
         Interp::Linear | Interp::Step => 1, // ENVELOPE_LINEAR
@@ -292,11 +292,12 @@ fn staircase(points: &[(u16, u8)]) -> Vec<(u16, u8)> {
 }
 
 /// Project an [`Envelope`] facet into AMY's amplitude-EG wire fragment: the `A`
-/// breakpoint-set string (docs/api.md `A` → `eg0_times`/`eg0_values`; comma-
-/// separated `time_ms,value` pairs, last pair = release) plus the `T` eg_type
-/// code (docs/api.md `T` → `eg_type[0]`). AMY's tokenizer copies the `A` argument
-/// over the charset `" 0123456789-,."` and stops at the next letter (parse.c:188),
-/// so appending `T…` (and later `l1`) to the same message is unambiguous.
+/// breakpoint-set string (upstream AMY `docs/api.md`, `A` →
+/// `eg0_times`/`eg0_values`; comma-separated `time_ms,value` pairs, last pair =
+/// release) plus the `T` eg_type code (upstream AMY `docs/api.md`, `T` →
+/// `eg_type[0]`). AMY's tokenizer copies the `A` argument over the charset
+/// `" 0123456789-,."` and stops at the next letter (parse.c:188), so appending
+/// `T…` (and later `l1`) to the same message is unambiguous.
 ///
 /// Example — `Envelope{ points:[(0,127),(120,12),(40,0)], interp: Exp }`
 /// projects to `"A0,1,120,0.0945,40,0T3"`: jump to full, true-exp decay to ~0.09

@@ -1,5 +1,4 @@
-//! Desktop-AMY tutti leaf — the audible render (experiment 1 of
-//! `docs/research/tutti-amy-esp32-leaf.md`).
+//! Desktop-AMY tutti leaf — the audible partition/rejoin render proof.
 //!
 //! Run: `cargo run` inside tutti-amy/ (AMY is compiled by build.rs).
 //!

@@ -33,6 +33,18 @@ cargo clippy -p tutti-music-hhhs --all-targets -- -D warnings
 cargo test --manifest-path tutti-amy/Cargo.toml --all-features
 ```
 
+Before a release, run the complete manual gate:
+
+```sh
+scripts/verify-release.sh
+```
+
+It checks formatting, the complete workspace and excluded AMY test suites,
+strict Clippy and rustdoc, the WASM compile surface, and a fresh external
+Git consumer built from an isolated snapshot. It is intentionally opt-in: no repository workflow runs it
+automatically. The AMY checks require a prepared checkout at `/laboratory/amy`
+or at `AMY_SRC`.
+
 The generation-5 music wire is deliberately distinct from earlier Walkie/Tutti
 formats. Functional interoperability is the contract; old hashes and hosts are
 not preserved.

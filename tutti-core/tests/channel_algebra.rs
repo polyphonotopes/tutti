@@ -7,12 +7,10 @@
 //!
 //!   *only authorized authors may ADD notes to a channel; ANYONE may REMOVE.*
 //!
-//! Grounding: `docs/vision/eventually-consistent-pitchsets.md` — "The channel
-//! constraint algebra" (**a channel = an address space × a membership policy × a
-//! projection**) and its headline invariant: *"add and remove are independent
-//! axes"*, with the missing cell named outright — "**only certain devices may add
-//! to a channel; anyone may remove**" (device-gated add × shared observed-remove).
-//! The doc's honest frame is reproduced here mechanically: a violating op **voids**
+//! The executable contract treats a channel as an address space, a membership
+//! policy, and a projection. Its headline invariant is that add and remove are
+//! independent axes: only designated devices may add to a channel, while anyone
+//! may remove. A violating op **voids**
 //! — "it stays in history, signed and attributable, and every honest replica
 //! computes the same 'no effect' verdict for it at every horizon" — exactly the
 //! owner-gate shape ("stores the non-owner's move and gives it nothing").

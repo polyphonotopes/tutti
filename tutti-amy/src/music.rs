@@ -1,8 +1,7 @@
 //! The tutti-amy scenario harness: two capability-native HHHS music Replicas
 //! partition, diverge, then exchange repair records and converge — and the converging materializer
 //! drives AMY. This proves the leaf thesis: **verifiable eventually-consistent
-//! convergence produces audio** (docs/research/tutti-amy-esp32-leaf.md,
-//! experiment 1).
+//! convergence produces audio**.
 //!
 //! The music values live in `tutti-music`; command encoding, capability
 //! admission, materialization, and repair live in `tutti-music-hhhs`. What stays

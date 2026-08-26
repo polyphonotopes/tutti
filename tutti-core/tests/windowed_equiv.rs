@@ -1,5 +1,4 @@
-//! `windowed_equiv` — the M3.0 hard correctness gate
-//! (`docs/vision/windowed-store-design.md` §6.3).
+//! `windowed_equiv` — the M3.0 hard correctness gate.
 //!
 //! The whole M3.0 claim in one suite: while `N ≤ W`, the bounded
 //! [`WindowedStore`] folds **byte-identically** to a full [`Store`], both agreeing
@@ -216,8 +215,8 @@ impl OpLanguage for WinLang {
         }
     }
 
-    /// **M3.1 monotone-shadowing retention** (`windowed-store-design.md` §2.5). The
-    /// residue this domain keeps at a cut, composed from the shadowing lemmas:
+    /// **M3.1 monotone-shadowing retention.** The residue this domain keeps at a
+    /// cut, composed from the shadowing lemmas:
     ///
     /// - **A (degrees, add-wins):** per key, keep the **per-author causal maxima of
     ///   the surviving adds** (adds no remove observed); discard killed adds,
@@ -932,7 +931,6 @@ fn fence_view_panics_on_truncated_window() {
 
 // ===========================================================================
 // M3.1 — the compaction gate: N ≫ W, adversarial cuts, view ≡ full ≡ kernel.
-// (`windowed-store-design.md` §2.4-2.6, §6.3.)
 //
 // The M3.1 claim in one suite: a compacting `WindowedStore` (built with
 // `with_window`, so `WinLang::retain` discards the monotone-shadowed degree adds /
@@ -1429,8 +1427,6 @@ fn compact_twice_is_idempotent_and_conservative() {
 
 // ===========================================================================
 // M3.2 — the memory-bound gate: the packed ancestry summary is O(W+|R|²), NOT O(N)/O(N²).
-// (`windowed-store-design.md` §3.2 cut masks + §3.3 in-window bitset + §3.4 residue reach
-// matrix.)
 //
 // M3.1 answered `is_ancestor` across the cut from an EXACT-but-UNBOUNDED summary: a full
 // strict-ancestor SET per lifted op — Θ(N²), the very ReachIndex cost windowing exists to
