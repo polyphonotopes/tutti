@@ -48,3 +48,18 @@ or at `AMY_SRC`.
 The generation-5 music wire is deliberately distinct from earlier Walkie/Tutti
 formats. Functional interoperability is the contract; old hashes and hosts are
 not preserved.
+
+## Executable realtime-session probe
+
+`tutti-music-hhhs/tests/realtime_session_model.rs` grounds the proposed fast
+session boundary without making it a public API yet. It proves one durable
+capability presentation can authorize an exact compact binding table, a short
+authenticated gate frame can update a projection immediately, and ordinary
+HHHS admission and repair later confirm or correct that projection. The model
+packet layout and MAC are deliberately non-normative; key agreement, AEAD,
+expiry/revocation cadence, MIDI 2.0/UMP mappings, and replay-window policy remain
+open design work.
+
+```sh
+cargo test -p tutti-music-hhhs --test realtime_session_model
+```
