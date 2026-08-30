@@ -1,10 +1,11 @@
-//! Capability-native HHHS Replica protocol for [`tutti_music`].
+//! HHHS Replica protocol for [`tutti_music`].
 //!
 //! This crate is the narrow interoperability seam shared by full applications
 //! and music-only peers. It owns the music command encoding, semantic
-//! capability areas, admission policy, deterministic root construction, and
-//! rebuildable materializer. It owns no discovery, endpoint, mesh, carrier,
-//! task, clock, filesystem, or application-extension state.
+//! authority profiles, admission policy, deterministic capability-root
+//! construction, and rebuildable materializer. It owns no discovery, session
+//! establishment, endpoint, mesh, carrier, task, clock, filesystem, or
+//! application-extension state.
 
 #![forbid(unsafe_code)]
 
@@ -22,24 +23,39 @@ use hhhs_proof::{MAX_PRESENTED_GRANTS, SigningKey};
 use hhhs_replica::{
     AdmissionOutcome, AdmissionPolicy, AdmissionRequest, AdmittedAuthority, Replica, ReplicaError,
 };
-use hhhs_store::{Materializer, ProjectionCheckpoint, ProjectionKey, ReplicaStorage};
+use hhhs_store::{
+    Materializer, ProjectionCheckpoint, ProjectionInput, ProjectionKey, ProjectionUpdate,
+    ReplicaStorage,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tutti_music::{Envelope, MusicOp, TunedDegree, TuningDefinition};
+use tutti_music::{
+    Envelope, MusicOp, RoundTableConfig, SharedPitchSet, TunedDegree, TunedPeriodicPitch,
+    TuningDefinition,
+};
 
-pub const PROTOCOL_GENERATION: u32 = 5;
-pub const REPAIR_ALPN: &[u8] = b"tutti/music/hhhs-replica/5";
+pub const PROTOCOL_GENERATION: u32 = 8;
+const PROJECTION_SCHEMA: u32 = 6;
+pub const REPAIR_ALPN: &[u8] = b"tutti/music/hhhs-replica/8";
 pub const STRATEGY_VERSION: u32 = 1;
 pub const STRATEGY_NAME: &str = "tutti-music-hhhs-entry";
 
-pub const COMMAND_DOMAIN: &[u8] = b"tutti music command v5\0";
+pub const COMMAND_DOMAIN: &[u8] = b"tutti music command v8\0";
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 
-/// Stable Ed25519 receiver identity used by music commands and holder views.
+/// Stable actor identity used by music commands and holder views.
+///
+/// Capability authority binds these bytes to an Ed25519 receiver. Open-session
+/// authority treats them as an application-level identity supplied by an
+/// already-authenticated channel.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct ActorId(pub [u8; 32]);
 
 impl ActorId {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub fn from_signing_key(key: &SigningKey) -> Self {
         Self(key.verifying_key().to_bytes())
     }
@@ -155,18 +171,26 @@ pub fn tuning_area(namespace: Digest) -> Area {
     Area::new(namespace, [b"music".to_vec(), b"tuning".to_vec()]).expect("bounded command area")
 }
 
+pub fn performance_area(namespace: Digest) -> Area {
+    Area::new(namespace, [b"music".to_vec(), b"performance".to_vec()])
+        .expect("bounded command area")
+}
+
 pub fn command_area(namespace: Digest, command: &MusicOp) -> Area {
     match command {
-        MusicOp::AddDegree { .. } | MusicOp::RemoveDegree { .. } | MusicOp::SetEnvelope { .. } => {
-            notes_area(namespace)
-        }
+        MusicOp::AddDegree { .. }
+        | MusicOp::RemoveDegree { .. }
+        | MusicOp::AddPitch { .. }
+        | MusicOp::RemovePitch { .. }
+        | MusicOp::SetEnvelope { .. } => notes_area(namespace),
         MusicOp::SetTuning { .. } => tuning_area(namespace),
+        MusicOp::SetRoundTable { .. } => performance_area(namespace),
     }
 }
 
 fn presented_ids(envelope: &CommandEnvelope) -> Result<Vec<EntryHash>, String> {
-    if envelope.presented.is_empty() || envelope.presented.len() > MAX_PRESENTED_GRANTS {
-        return Err("command presents an invalid number of capability grants".into());
+    if envelope.presented.len() > MAX_PRESENTED_GRANTS {
+        return Err("command presents too many capability grants".into());
     }
     let ids: Vec<_> = envelope
         .presented
@@ -180,15 +204,54 @@ fn presented_ids(envelope: &CommandEnvelope) -> Result<Vec<EntryHash>, String> {
     Ok(ids)
 }
 
+fn capability_ids(envelope: &CommandEnvelope) -> Result<Vec<EntryHash>, String> {
+    let ids = presented_ids(envelope)?;
+    if ids.is_empty() {
+        return Err("capability-authorized command presents no grants".into());
+    }
+    Ok(ids)
+}
+
+/// The authority contract of a music Replica.
+///
+/// This is intentionally explicit and forms part of the protocol profile:
+/// peers configured for different modes refuse one another's entries instead
+/// of silently downgrading authentication.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MusicAuthority {
+    Capabilities,
+    OpenSession,
+}
+
 /// Admission policy shared byte-for-byte by full and music-only Replicas.
 #[derive(Clone)]
 pub struct MusicAdmissionPolicy {
     namespace: Digest,
+    authority: MusicAuthority,
 }
 
 impl MusicAdmissionPolicy {
+    /// Capability-authorized policy retained as the conservative default.
     pub const fn new(namespace: Digest) -> Self {
-        Self { namespace }
+        Self::capabilities(namespace)
+    }
+
+    pub const fn capabilities(namespace: Digest) -> Self {
+        Self {
+            namespace,
+            authority: MusicAuthority::Capabilities,
+        }
+    }
+
+    pub const fn open_session(namespace: Digest) -> Self {
+        Self {
+            namespace,
+            authority: MusicAuthority::OpenSession,
+        }
+    }
+
+    pub const fn authority(&self) -> MusicAuthority {
+        self.authority
     }
 
     fn validate_capability(
@@ -198,6 +261,9 @@ impl MusicAdmissionPolicy {
         history: &DagSnapshot,
         authority: &AdmittedAuthority,
     ) -> Result<(), String> {
+        if self.authority != MusicAuthority::Capabilities {
+            return Err("capability operation is disabled for open-session music".into());
+        }
         match (op, authority) {
             (CapabilityOp::Grant(grant), AdmittedAuthority::TrustedRoot) => {
                 if grant.parent.is_some()
@@ -264,15 +330,28 @@ impl AdmissionPolicy for MusicAdmissionPolicy {
         if envelope.namespace != *self.namespace.as_bytes() {
             return Err("command namespace does not match this Replica".into());
         }
-        let AdmittedAuthority::Presented { presentation, .. } = authority else {
-            return Err("music commands require a verified capability presentation".into());
-        };
-        if presentation.receiver().as_bytes() != envelope.actor.0
-            || presentation.presented() != presented_ids(&envelope)?
-            || presentation.context().area != command_area(self.namespace, &envelope.command)
-            || presentation.context().right != Right::Invoke
-        {
-            return Err("music command presentation does not match its envelope".into());
+        match (self.authority, authority) {
+            (MusicAuthority::Capabilities, AdmittedAuthority::Presented { presentation, .. }) => {
+                if presentation.receiver().as_bytes() != envelope.actor.0
+                    || presentation.presented() != capability_ids(&envelope)?
+                    || presentation.context().area
+                        != command_area(self.namespace, &envelope.command)
+                    || presentation.context().right != Right::Invoke
+                {
+                    return Err("music command presentation does not match its envelope".into());
+                }
+            }
+            (MusicAuthority::OpenSession, AdmittedAuthority::Open { .. }) => {
+                if !envelope.presented.is_empty() {
+                    return Err("open-session command must not present capability grants".into());
+                }
+            }
+            (MusicAuthority::Capabilities, _) => {
+                return Err("music commands require a verified capability presentation".into());
+            }
+            (MusicAuthority::OpenSession, _) => {
+                return Err("open-session music requires HHHS open authority".into());
+            }
         }
         tutti_music::ops::validate(&envelope.command)
     }
@@ -297,13 +376,35 @@ pub fn initialize<S: ReplicaStorage + 'static>(
         Position::empty(),
     );
     let root_id = root.hash();
-    let replica = Replica::builder(storage, MusicAdmissionPolicy::new(namespace), namespace)
-        .ed25519_capabilities([root_id])?
-        .build()?;
+    let replica = Replica::builder(
+        storage,
+        MusicAdmissionPolicy::capabilities(namespace),
+        namespace,
+    )
+    .ed25519_capabilities([root_id])?
+    .build()?;
     if !replica.snapshot().history.contains(&root_id) {
         replica.admit(AdmissionRequest::trusted_root(root))?;
     }
     Ok((replica, root_id))
+}
+
+/// Build a music Replica whose trust boundary is an authenticated session.
+///
+/// Entries retain HHHS hashing, causal ordering, validation, merge, and repair,
+/// but carry no per-entry capability proof. Callers must only feed repair data
+/// received through a channel whose peer was authenticated independently.
+pub fn initialize_open<S: ReplicaStorage + 'static>(
+    namespace: Digest,
+    storage: S,
+) -> Result<MusicReplica<S>, ReplicaError> {
+    Replica::builder(
+        storage,
+        MusicAdmissionPolicy::open_session(namespace),
+        namespace,
+    )
+    .open()
+    .build()
 }
 
 pub fn author<S: ReplicaStorage + 'static>(
@@ -324,13 +425,26 @@ pub fn author<S: ReplicaStorage + 'static>(
     replica.author_ed25519(payload, area, Right::Invoke, presented, key)
 }
 
+/// Author through HHHS open authority after the caller's session boundary has
+/// authenticated the actor. This performs no public-key operation.
+pub fn author_open<S: ReplicaStorage + 'static>(
+    replica: &MusicReplica<S>,
+    namespace: Digest,
+    actor: ActorId,
+    command: MusicOp,
+) -> Result<AdmissionOutcome, ReplicaError> {
+    let payload = encode_command(namespace, actor, &[], command)
+        .map_err(|error| ReplicaError::ApplicationRejected(error.to_string()))?;
+    replica.author_open(payload)
+}
+
 fn currently_authorized<R: Reach>(
     capabilities: &CapabilitySnapshot<R>,
     history: &DagSnapshot,
     entry: EntryHash,
     envelope: &CommandEnvelope,
 ) -> bool {
-    let Ok(presented) = presented_ids(envelope) else {
+    let Ok(presented) = capability_ids(envelope) else {
         return false;
     };
     matches!(
@@ -346,6 +460,12 @@ fn currently_authorized<R: Reach>(
     )
 }
 
+fn valid_open_command(namespace: Digest, envelope: &CommandEnvelope) -> bool {
+    envelope.namespace == *namespace.as_bytes()
+        && envelope.presented.is_empty()
+        && tutti_music::ops::validate(&envelope.command).is_ok()
+}
+
 pub fn commands(history: &DagSnapshot, roots: &[EntryHash]) -> Vec<(EntryHash, ActorId, MusicOp)> {
     let capabilities = CapabilitySnapshot::<LazyReach>::capture_with(
         history,
@@ -359,6 +479,29 @@ pub fn commands(history: &DagSnapshot, roots: &[EntryHash]) -> Vec<(EntryHash, A
             let id = entry.hash();
             let envelope = decode_command(&entry.payload).ok()?;
             currently_authorized(&capabilities, history, id, &envelope).then_some((
+                id,
+                envelope.actor,
+                envelope.command,
+            ))
+        })
+        .collect()
+}
+
+/// Decode commands admitted under the open-session profile.
+///
+/// This does not authenticate actors. The enclosing session is responsible for
+/// authenticating every repair sender before its entries reach the Replica.
+pub fn open_commands(
+    history: &DagSnapshot,
+    namespace: Digest,
+) -> Vec<(EntryHash, ActorId, MusicOp)> {
+    history
+        .entries_topo()
+        .into_iter()
+        .filter_map(|entry| {
+            let id = entry.hash();
+            let envelope = decode_command(&entry.payload).ok()?;
+            valid_open_command(namespace, &envelope).then_some((
                 id,
                 envelope.actor,
                 envelope.command,
@@ -394,8 +537,13 @@ fn resolve_maxima<T>(values: Vec<(EntryHash, T)>) -> Option<T> {
 pub struct MusicView {
     pub live: BTreeSet<TunedDegree>,
     pub holders: BTreeMap<TunedDegree, BTreeSet<ActorId>>,
+    pub live_pitches: BTreeSet<TunedPeriodicPitch>,
+    pub pitch_holders: BTreeMap<TunedPeriodicPitch, BTreeSet<ActorId>>,
     pub envelopes: BTreeMap<TunedDegree, Envelope>,
     pub tuning: TuningDefinition,
+    pub round_table: RoundTableConfig,
+    /// One room-owned pitch set. Any authorized peer may edit any member.
+    pub shared_pitches: SharedPitchSet,
 }
 
 impl Default for MusicView {
@@ -403,8 +551,12 @@ impl Default for MusicView {
         Self {
             live: BTreeSet::new(),
             holders: BTreeMap::new(),
+            live_pitches: BTreeSet::new(),
+            pitch_holders: BTreeMap::new(),
             envelopes: BTreeMap::new(),
             tuning: TuningDefinition::twelve_tet(),
+            round_table: RoundTableConfig::default(),
+            shared_pitches: SharedPitchSet::default(),
         }
     }
 }
@@ -414,99 +566,250 @@ pub fn materialize(history: &DagSnapshot, roots: &[EntryHash]) -> MusicView {
     materialize_commands(history, &commands)
 }
 
+pub fn materialize_open(history: &DagSnapshot, namespace: Digest) -> MusicView {
+    let commands = open_commands(history, namespace);
+    materialize_commands(history, &commands)
+}
+
 fn materialize_commands(
     history: &DagSnapshot,
     commands: &[(EntryHash, ActorId, MusicOp)],
 ) -> MusicView {
-    let reach = WalkingReach::new(history);
-    let mut tuning_maxima = Vec::new();
-    for (id, _, command) in commands {
-        if let MusicOp::SetTuning { definition } = command {
-            advance_maxima(&reach, &mut tuning_maxima, *id, definition.clone());
-        }
+    fold_state(history, commands).view()
+}
+
+#[derive(Clone, Default)]
+struct FoldState {
+    tuning_maxima: Vec<(EntryHash, TuningDefinition)>,
+    round_table_maxima: Vec<(EntryHash, RoundTableConfig)>,
+    live_adds: BTreeMap<TunedDegree, Vec<(EntryHash, ActorId)>>,
+    live_pitch_adds: BTreeMap<TunedPeriodicPitch, Vec<(EntryHash, ActorId)>>,
+    envelope_maxima: BTreeMap<TunedDegree, Vec<(EntryHash, Envelope)>>,
+}
+
+impl FoldState {
+    fn tuning(&self) -> TuningDefinition {
+        resolve_maxima(self.tuning_maxima.clone()).unwrap_or_else(TuningDefinition::twelve_tet)
     }
-    let tuning = resolve_maxima(tuning_maxima).unwrap_or_else(TuningDefinition::twelve_tet);
-    let Ok(active) = tuning.validate("active music Replica tuning") else {
-        return MusicView {
-            tuning,
-            ..MusicView::default()
+
+    fn round_table(&self) -> RoundTableConfig {
+        resolve_maxima(self.round_table_maxima.clone()).unwrap_or_default()
+    }
+
+    fn apply_commands(
+        &mut self,
+        history: &DagSnapshot,
+        commands: &[(EntryHash, ActorId, MusicOp)],
+    ) {
+        let tuning = self.tuning();
+        let Ok(active) = tuning.validate("active music Replica tuning") else {
+            return;
         };
-    };
-
-    let mut live_adds: BTreeMap<TunedDegree, Vec<(EntryHash, ActorId)>> = BTreeMap::new();
-    let mut envelope_maxima: BTreeMap<TunedDegree, Vec<(EntryHash, Envelope)>> = BTreeMap::new();
-    for (id, actor, command) in commands {
-        match command {
-            MusicOp::AddDegree { degree } if degree.validate(&active).is_ok() => {
-                live_adds.entry(*degree).or_default().push((*id, *actor));
-            }
-            MusicOp::RemoveDegree { degree } => {
-                if let Some(adds) = live_adds.get_mut(degree) {
-                    adds.retain(|(add, _)| !reach.is_ancestor(add, id));
+        let reach = WalkingReach::new(history);
+        for (id, actor, command) in commands {
+            match command {
+                MusicOp::AddDegree { degree } if degree.validate(&active).is_ok() => {
+                    self.live_adds
+                        .entry(*degree)
+                        .or_default()
+                        .push((*id, *actor));
                 }
+                MusicOp::RemoveDegree { degree } => {
+                    if let Some(adds) = self.live_adds.get_mut(degree) {
+                        adds.retain(|(add, _)| !reach.is_ancestor(add, id));
+                    }
+                }
+                MusicOp::AddPitch { pitch } if pitch.validate(&active).is_ok() => {
+                    self.live_pitch_adds
+                        .entry(*pitch)
+                        .or_default()
+                        .push((*id, *actor));
+                }
+                MusicOp::RemovePitch { pitch } => {
+                    if let Some(adds) = self.live_pitch_adds.get_mut(pitch) {
+                        adds.retain(|(add, _)| !reach.is_ancestor(add, id));
+                    }
+                }
+                MusicOp::SetEnvelope { degree, env } if degree.validate(&active).is_ok() => {
+                    advance_maxima(
+                        &reach,
+                        self.envelope_maxima.entry(*degree).or_default(),
+                        *id,
+                        env.clone(),
+                    );
+                }
+                MusicOp::SetRoundTable { config } => {
+                    advance_maxima(&reach, &mut self.round_table_maxima, *id, *config);
+                }
+                MusicOp::SetTuning { .. }
+                | MusicOp::SetEnvelope { .. }
+                | MusicOp::AddDegree { .. }
+                | MusicOp::AddPitch { .. } => {}
             }
-            MusicOp::SetEnvelope { degree, env } if degree.validate(&active).is_ok() => {
-                advance_maxima(
-                    &reach,
-                    envelope_maxima.entry(*degree).or_default(),
-                    *id,
-                    env.clone(),
-                );
-            }
-            _ => {}
         }
     }
 
-    let mut live = BTreeSet::new();
-    let mut holders = BTreeMap::new();
-    for (degree, adds) in live_adds {
-        if !adds.is_empty() {
-            live.insert(degree);
-            holders.insert(degree, adds.into_iter().map(|(_, actor)| actor).collect());
+    fn view(&self) -> MusicView {
+        let tuning = self.tuning();
+        if tuning.validate("active music Replica tuning").is_err() {
+            return MusicView {
+                tuning,
+                round_table: self.round_table(),
+                ..MusicView::default()
+            };
         }
-    }
-    let envelopes = envelope_maxima
-        .into_iter()
-        .filter_map(|(degree, values)| resolve_maxima(values).map(|value| (degree, value)))
-        .collect();
-    MusicView {
-        live,
-        holders,
-        envelopes,
-        tuning,
+        let mut live = BTreeSet::new();
+        let mut holders = BTreeMap::new();
+        for (degree, adds) in &self.live_adds {
+            if !adds.is_empty() {
+                live.insert(*degree);
+                holders.insert(*degree, adds.iter().map(|(_, actor)| *actor).collect());
+            }
+        }
+        let mut live_pitches = BTreeSet::new();
+        let mut pitch_holders = BTreeMap::new();
+        for (pitch, adds) in &self.live_pitch_adds {
+            if !adds.is_empty() {
+                live_pitches.insert(*pitch);
+                pitch_holders.insert(*pitch, adds.iter().map(|(_, actor)| *actor).collect());
+            }
+        }
+        let envelopes = self
+            .envelope_maxima
+            .iter()
+            .filter_map(|(degree, values)| {
+                resolve_maxima(values.clone()).map(|value| (*degree, value))
+            })
+            .collect();
+        let shared_pitches = SharedPitchSet {
+            pitch_classes: live.clone(),
+            pitches: live_pitches.clone(),
+        };
+        MusicView {
+            live,
+            holders,
+            live_pitches,
+            pitch_holders,
+            envelopes,
+            tuning,
+            round_table: self.round_table(),
+            shared_pitches,
+        }
     }
 }
 
-#[derive(Clone, Copy)]
+fn fold_state(history: &DagSnapshot, commands: &[(EntryHash, ActorId, MusicOp)]) -> FoldState {
+    let reach = WalkingReach::new(history);
+    let mut state = FoldState::default();
+    for (id, _, command) in commands {
+        if let MusicOp::SetTuning { definition } = command {
+            advance_maxima(&reach, &mut state.tuning_maxima, *id, definition.clone());
+        }
+    }
+    state.apply_commands(history, commands);
+    state
+}
+
+#[derive(Clone)]
+enum MaterializationAuthority {
+    Capabilities(Vec<EntryHash>),
+    OpenSession(Digest),
+}
+
+#[derive(Clone)]
 pub struct MusicMaterializer {
-    root: EntryHash,
+    authority: MaterializationAuthority,
 }
 
 impl MusicMaterializer {
-    pub const fn new(root: EntryHash) -> Self {
-        Self { root }
+    pub fn new(root: EntryHash) -> Self {
+        Self::from_roots([root])
+    }
+
+    /// Materialize a federated room whose accepted commands may descend from
+    /// more than one explicitly trusted capability root. Roots are sorted and
+    /// deduplicated so every peer derives the same projection identity.
+    pub fn from_roots(roots: impl IntoIterator<Item = EntryHash>) -> Self {
+        let roots: BTreeSet<_> = roots.into_iter().collect();
+        Self {
+            authority: MaterializationAuthority::Capabilities(roots.into_iter().collect()),
+        }
+    }
+
+    /// Materialize open-authority entries from one authenticated session
+    /// namespace. The namespace is included in the projection identity.
+    pub const fn open_session(namespace: Digest) -> Self {
+        Self {
+            authority: MaterializationAuthority::OpenSession(namespace),
+        }
+    }
+
+    pub fn roots(&self) -> &[EntryHash] {
+        match &self.authority {
+            MaterializationAuthority::Capabilities(roots) => roots,
+            MaterializationAuthority::OpenSession(_) => &[],
+        }
+    }
+
+    fn projection_name(&self) -> String {
+        use std::fmt::Write;
+
+        let mut binding = Vec::new();
+        match &self.authority {
+            MaterializationAuthority::Capabilities(roots) => {
+                binding.extend_from_slice(b"capabilities\0");
+                binding.reserve(roots.len() * 32);
+                for root in roots {
+                    binding.extend_from_slice(root.as_bytes());
+                }
+            }
+            MaterializationAuthority::OpenSession(namespace) => {
+                binding.extend_from_slice(b"open-session\0");
+                binding.extend_from_slice(namespace.as_bytes());
+            }
+        }
+        let digest = Digest::of(&binding);
+        let suffix =
+            digest
+                .as_bytes()
+                .iter()
+                .fold(String::with_capacity(64), |mut encoded, byte| {
+                    let _ = write!(encoded, "{byte:02x}");
+                    encoded
+                });
+        format!("tutti/music/{suffix}")
     }
 }
 
 #[derive(Serialize, Deserialize)]
 struct CheckpointState {
-    live: Vec<TunedDegree>,
-    holders: Vec<(TunedDegree, Vec<ActorId>)>,
-    envelopes: Vec<(TunedDegree, Envelope)>,
-    tuning: TuningDefinition,
+    tuning_maxima: Vec<(EntryHash, TuningDefinition)>,
+    round_table_maxima: Vec<(EntryHash, RoundTableConfig)>,
+    live_adds: Vec<(TunedDegree, Vec<(EntryHash, ActorId)>)>,
+    live_pitch_adds: Vec<(TunedPeriodicPitch, Vec<(EntryHash, ActorId)>)>,
+    envelope_maxima: Vec<(TunedDegree, Vec<(EntryHash, Envelope)>)>,
 }
 
-impl From<MusicView> for CheckpointState {
-    fn from(view: MusicView) -> Self {
+impl From<FoldState> for CheckpointState {
+    fn from(state: FoldState) -> Self {
         Self {
-            live: view.live.into_iter().collect(),
-            holders: view
-                .holders
-                .into_iter()
-                .map(|(degree, actors)| (degree, actors.into_iter().collect()))
-                .collect(),
-            envelopes: view.envelopes.into_iter().collect(),
-            tuning: view.tuning,
+            tuning_maxima: state.tuning_maxima,
+            round_table_maxima: state.round_table_maxima,
+            live_adds: state.live_adds.into_iter().collect(),
+            live_pitch_adds: state.live_pitch_adds.into_iter().collect(),
+            envelope_maxima: state.envelope_maxima.into_iter().collect(),
+        }
+    }
+}
+
+impl From<CheckpointState> for FoldState {
+    fn from(state: CheckpointState) -> Self {
+        Self {
+            tuning_maxima: state.tuning_maxima,
+            round_table_maxima: state.round_table_maxima,
+            live_adds: state.live_adds.into_iter().collect(),
+            live_pitch_adds: state.live_pitch_adds.into_iter().collect(),
+            envelope_maxima: state.envelope_maxima.into_iter().collect(),
         }
     }
 }
@@ -516,16 +819,7 @@ impl TryFrom<&ProjectionCheckpoint> for MusicView {
 
     fn try_from(checkpoint: &ProjectionCheckpoint) -> Result<Self, Self::Error> {
         let state: CheckpointState = serde_json::from_slice(checkpoint.bytes())?;
-        Ok(Self {
-            live: state.live.into_iter().collect(),
-            holders: state
-                .holders
-                .into_iter()
-                .map(|(degree, actors)| (degree, actors.into_iter().collect()))
-                .collect(),
-            envelopes: state.envelopes.into_iter().collect(),
-            tuning: state.tuning,
-        })
+        Ok(FoldState::from(state).view())
     }
 }
 
@@ -533,7 +827,8 @@ impl Materializer for MusicMaterializer {
     type Error = serde_json::Error;
 
     fn key(&self) -> ProjectionKey {
-        ProjectionKey::new("tutti/music", PROTOCOL_GENERATION).expect("constant projection key")
+        ProjectionKey::new(self.projection_name(), PROJECTION_SCHEMA)
+            .expect("bounded music projection key")
     }
 
     fn project(
@@ -541,7 +836,60 @@ impl Materializer for MusicMaterializer {
         history: &DagSnapshot,
         _prior: Option<&ProjectionCheckpoint>,
     ) -> Result<Vec<u8>, Self::Error> {
-        serde_json::to_vec(&CheckpointState::from(materialize(history, &[self.root])))
+        let commands = match &self.authority {
+            MaterializationAuthority::Capabilities(roots) => commands(history, roots),
+            MaterializationAuthority::OpenSession(namespace) => open_commands(history, *namespace),
+        };
+        serde_json::to_vec(&CheckpointState::from(fold_state(history, &commands)))
+    }
+
+    fn update(&self, input: ProjectionInput<'_>) -> Result<Vec<u8>, Self::Error> {
+        let ProjectionUpdate::Incremental { appended } = input.update else {
+            return self.project(input.history, None);
+        };
+        let Some(prior) = input.prior else {
+            return self.project(input.history, None);
+        };
+
+        let mut incremental = Vec::new();
+        let capabilities = match &self.authority {
+            MaterializationAuthority::Capabilities(roots) => {
+                Some(CapabilitySnapshot::<LazyReach>::capture_with(
+                    input.history,
+                    roots.iter().copied(),
+                    LazyReach::new,
+                ))
+            }
+            MaterializationAuthority::OpenSession(_) => None,
+        };
+        for entry in appended {
+            if capabilities.is_some() && decode_capability(&entry.payload).is_ok() {
+                return self.project(input.history, None);
+            }
+            let Ok(envelope) = decode_command(&entry.payload) else {
+                return self.project(input.history, None);
+            };
+            if matches!(envelope.command, MusicOp::SetTuning { .. }) {
+                return self.project(input.history, None);
+            }
+            let accepted = match (&self.authority, capabilities.as_ref()) {
+                (MaterializationAuthority::Capabilities(_), Some(capabilities)) => {
+                    currently_authorized(capabilities, input.history, entry.hash(), &envelope)
+                }
+                (MaterializationAuthority::OpenSession(namespace), None) => {
+                    valid_open_command(*namespace, &envelope)
+                }
+                _ => false,
+            };
+            if accepted {
+                incremental.push((entry.hash(), envelope.actor, envelope.command));
+            }
+        }
+
+        let checkpoint: CheckpointState = serde_json::from_slice(prior.bytes())?;
+        let mut state = FoldState::from(checkpoint);
+        state.apply_commands(input.history, &incremental);
+        serde_json::to_vec(&CheckpointState::from(state))
     }
 }
 
@@ -616,9 +964,21 @@ mod tests {
                 .collect(),
         )
         .unwrap_or_else(TuningDefinition::twelve_tet);
+        let round_table = resolve_reference(
+            &reach,
+            commands
+                .iter()
+                .filter_map(|(id, _, command)| match command {
+                    MusicOp::SetRoundTable { config } => Some((*id, *config)),
+                    _ => None,
+                })
+                .collect(),
+        )
+        .unwrap_or_default();
         let Ok(active) = tuning.validate("reference tuning") else {
             return MusicView {
                 tuning,
+                round_table,
                 ..MusicView::default()
             };
         };
@@ -661,11 +1021,39 @@ mod tests {
                 resolve_reference(&reach, values).map(|value| (degree, value))
             })
             .collect();
+        let mut live_pitches = BTreeSet::new();
+        let mut pitch_holders: BTreeMap<TunedPeriodicPitch, BTreeSet<ActorId>> = BTreeMap::new();
+        for (add, actor, pitch) in commands.iter().filter_map(|(id, actor, command)| {
+            let MusicOp::AddPitch { pitch } = command else {
+                return None;
+            };
+            pitch
+                .validate(&active)
+                .ok()
+                .map(|pitch| (*id, *actor, pitch))
+        }) {
+            let killed = commands.iter().any(|(remove, _, command)| {
+                matches!(command, MusicOp::RemovePitch { pitch: removed } if *removed == pitch)
+                    && reach.is_ancestor(&add, remove)
+            });
+            if !killed {
+                live_pitches.insert(pitch);
+                pitch_holders.entry(pitch).or_default().insert(actor);
+            }
+        }
+        let shared_pitches = SharedPitchSet {
+            pitch_classes: live.clone(),
+            pitches: live_pitches.clone(),
+        };
         MusicView {
             live,
             holders,
+            live_pitches,
+            pitch_holders,
             envelopes,
             tuning,
+            round_table,
+            shared_pitches,
         }
     }
 
@@ -705,6 +1093,165 @@ mod tests {
             materialize(&replica.snapshot().history, &[root]).live,
             [degree].into()
         );
+    }
+
+    #[test]
+    fn open_session_replica_keeps_crdt_semantics_without_per_entry_proofs() {
+        let namespace = Digest::of(b"authenticated channel open music object");
+        let actor = ActorId::from_bytes([0x51; 32]);
+        let replica = initialize_open(namespace, MemoryStorage::new()).unwrap();
+        let projection = MusicMaterializer::open_session(namespace);
+        let initial =
+            hhhs_store::materialize(&projection, &replica.snapshot().history, None).unwrap();
+        let degree = TunedDegree::new(&Tuning::twelve_tet(), 5).unwrap();
+
+        author_open(&replica, namespace, actor, MusicOp::AddDegree { degree }).unwrap();
+        let added =
+            hhhs_store::materialize(&projection, &replica.snapshot().history, Some(&initial))
+                .unwrap();
+        let added_view = MusicView::try_from(&added).unwrap();
+        assert_eq!(added_view.live, BTreeSet::from([degree]));
+        assert_eq!(added_view.holders[&degree], BTreeSet::from([actor]));
+
+        author_open(&replica, namespace, actor, MusicOp::RemoveDegree { degree }).unwrap();
+        let removed =
+            hhhs_store::materialize(&projection, &replica.snapshot().history, Some(&added))
+                .unwrap();
+        let rebuilt =
+            hhhs_store::materialize(&projection, &replica.snapshot().history, None).unwrap();
+        assert!(MusicView::try_from(&removed).unwrap().live.is_empty());
+        assert_eq!(removed.bytes(), rebuilt.bytes());
+    }
+
+    #[test]
+    fn authority_profiles_refuse_implicit_downgrades() {
+        let namespace = Digest::of(b"no implicit music authority downgrade");
+        let actor = ActorId::from_bytes([0x61; 32]);
+        let open = initialize_open(namespace, MemoryStorage::new()).unwrap();
+        let capability_payload = delegation_payload(
+            namespace,
+            EntryHash(Digest::of(b"absent parent")),
+            actor,
+            actor,
+        );
+        assert!(open.author_open(capability_payload).is_err());
+
+        let key = SigningKey::from_bytes(&[0x62; 32]);
+        let owner = ActorId::from_signing_key(&key);
+        let (capability, _) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
+        let payload = encode_command(
+            namespace,
+            owner,
+            &[],
+            MusicOp::AddDegree {
+                degree: TunedDegree::new(&Tuning::twelve_tet(), 1).unwrap(),
+            },
+        )
+        .unwrap();
+        assert!(capability.author_open(payload).is_err());
+    }
+
+    #[test]
+    fn federated_materializer_accepts_explicitly_trusted_peer_roots() {
+        let first_key = SigningKey::from_bytes(&[31; 32]);
+        let second_key = SigningKey::from_bytes(&[32; 32]);
+        let first = ActorId::from_signing_key(&first_key);
+        let second = ActorId::from_signing_key(&second_key);
+        let namespace = Digest::of(b"federated embedded music room");
+        let (replica, first_root) = initialize(namespace, first, MemoryStorage::new()).unwrap();
+        let second_root_entry = hhhs_cap::entry(
+            &CapabilityOp::Grant(Grant {
+                issuer: second.receiver(),
+                receiver: second.receiver(),
+                area: Area::root(namespace),
+                rights: Rights::ALL,
+                parent: None,
+            }),
+            Position::empty(),
+        );
+        let second_root = second_root_entry.hash();
+        replica.trust_root(second_root).unwrap();
+        replica
+            .admit(AdmissionRequest::trusted_root(second_root_entry))
+            .unwrap();
+
+        let first_degree = TunedDegree::new(&Tuning::twelve_tet(), 2).unwrap();
+        let second_degree = TunedDegree::new(&Tuning::twelve_tet(), 9).unwrap();
+        author(
+            &replica,
+            namespace,
+            &first_key,
+            vec![first_root],
+            MusicOp::AddDegree {
+                degree: first_degree,
+            },
+        )
+        .unwrap();
+        author(
+            &replica,
+            namespace,
+            &second_key,
+            vec![second_root],
+            MusicOp::AddDegree {
+                degree: second_degree,
+            },
+        )
+        .unwrap();
+
+        let projection = MusicMaterializer::from_roots([second_root, first_root, second_root]);
+        assert_eq!(
+            projection.roots(),
+            &[first_root.min(second_root), first_root.max(second_root)]
+        );
+        let checkpoint =
+            hhhs_store::materialize(&projection, &replica.snapshot().history, None).unwrap();
+        assert_eq!(
+            MusicView::try_from(&checkpoint).unwrap().live,
+            BTreeSet::from([first_degree, second_degree])
+        );
+    }
+
+    #[test]
+    fn projection_checkpoint_incrementally_tracks_note_on_and_off() {
+        let owner_key = SigningKey::from_bytes(&[41; 32]);
+        let owner = ActorId::from_signing_key(&owner_key);
+        let namespace = Digest::of(b"incremental tutti materializer");
+        let (replica, root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
+        let projection = MusicMaterializer::new(root);
+        let initial_history = replica.snapshot().history;
+        let initial = hhhs_store::materialize(&projection, &initial_history, None).unwrap();
+
+        let tuning = tutti_music::Tuning::twelve_tet();
+        let degree = TunedDegree::new(&tuning, 7).unwrap();
+        author(
+            &replica,
+            namespace,
+            &owner_key,
+            vec![root],
+            MusicOp::AddDegree { degree },
+        )
+        .unwrap();
+        let added_history = replica.snapshot().history;
+        let added = hhhs_store::materialize(&projection, &added_history, Some(&initial)).unwrap();
+        assert_eq!(
+            MusicView::try_from(&added).unwrap().live,
+            BTreeSet::from([degree])
+        );
+
+        author(
+            &replica,
+            namespace,
+            &owner_key,
+            vec![root],
+            MusicOp::RemoveDegree { degree },
+        )
+        .unwrap();
+        let removed_history = replica.snapshot().history;
+        let incremental =
+            hhhs_store::materialize(&projection, &removed_history, Some(&added)).unwrap();
+        let rebuilt = hhhs_store::materialize(&projection, &removed_history, None).unwrap();
+        assert!(MusicView::try_from(&incremental).unwrap().live.is_empty());
+        assert_eq!(incremental.bytes(), rebuilt.bytes());
     }
 
     #[test]

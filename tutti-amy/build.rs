@@ -25,10 +25,43 @@
 // compile against them. build.rs errors clearly if patches.h is missing.
 
 use std::path::PathBuf;
+use std::process::Command;
+
+fn verify_amy_checkout(amy_root: &str) {
+    let expected = include_str!("AMY_REV").trim();
+    let revision = Command::new("git")
+        .args(["-C", amy_root, "rev-parse", "HEAD"])
+        .output()
+        .unwrap_or_else(|error| panic!("could not inspect AMY checkout at {amy_root}: {error}"));
+    if !revision.status.success() {
+        panic!("AMY_SRC must point to a Git checkout: {amy_root}");
+    }
+    let actual = String::from_utf8(revision.stdout)
+        .expect("AMY Git revision is UTF-8")
+        .trim()
+        .to_owned();
+    if actual != expected {
+        panic!("AMY revision mismatch: expected {expected}, found {actual} at {amy_root}");
+    }
+    let status = Command::new("git")
+        .args([
+            "-C",
+            amy_root,
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ])
+        .output()
+        .unwrap_or_else(|error| panic!("could not inspect AMY checkout at {amy_root}: {error}"));
+    if !status.status.success() || !status.stdout.is_empty() {
+        panic!("AMY checkout has tracked modifications: {amy_root}");
+    }
+}
 
 fn main() {
     // AMY checkout. Override with AMY_SRC=/path/to/amy if it moves.
     let amy_root = std::env::var("AMY_SRC").unwrap_or_else(|_| "/laboratory/amy".to_string());
+    verify_amy_checkout(&amy_root);
     let amy_src = PathBuf::from(&amy_root).join("src");
 
     // The generated header AMY's Makefile builds via `python3 -m amy.headers`.
@@ -103,6 +136,7 @@ fn main() {
     // Rebuild triggers.
     println!("cargo:rerun-if-changed=csrc/amy_shim.c");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=AMY_REV");
     println!("cargo:rerun-if-env-changed=AMY_SRC");
     for f in sources {
         println!("cargo:rerun-if-changed={}", amy_src.join(f).display());

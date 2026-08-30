@@ -37,6 +37,7 @@ const FRAME_VERSION: u8 = 1;
 const FRAME_BODY_BYTES: usize = 23;
 const FRAME_TAG_BYTES: usize = 16;
 const FRAME_BYTES: usize = FRAME_BODY_BYTES + FRAME_TAG_BYTES;
+const MAX_SESSION_BINDINGS: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SessionManifest {
@@ -78,6 +79,7 @@ impl SessionManifest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionOpenError {
+    TooManyBindings,
     Proof,
     ActorMismatch,
     CapabilityDenied,
@@ -107,6 +109,9 @@ fn accept_manifest(
     history: &DagSnapshot,
     capability_root: EntryHash,
 ) -> Result<SessionManifest, SessionOpenError> {
+    if manifest.bindings.len() > MAX_SESSION_BINDINGS {
+        return Err(SessionOpenError::TooManyBindings);
+    }
     let expected = PresentationContext::new(
         manifest.namespace,
         manifest.action_digest(),
@@ -447,5 +452,49 @@ fn session_proof_cannot_be_replayed_for_other_bindings_or_receiver() {
     assert_eq!(
         accept_manifest(attacker_manifest, &attacker_presentation, &history, root),
         Err(SessionOpenError::CapabilityDenied)
+    );
+}
+
+#[test]
+fn session_manifest_refuses_an_unbounded_binding_table() {
+    let owner_key = SigningKey::from_bytes(&[21; 32]);
+    let owner = ActorId::from_signing_key(&owner_key);
+    let namespace = Digest::of(b"bounded tutti session manifest");
+    let (replica, root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
+    let tuning = Tuning::from_scl_text(
+        "large equal division",
+        &format!(
+            "large equal division\n{}\n{}",
+            MAX_SESSION_BINDINGS + 1,
+            (1..=MAX_SESSION_BINDINGS + 1)
+                .map(|step| format!(
+                    "{:.6}\n",
+                    step as f64 * 1200.0 / (MAX_SESSION_BINDINGS + 1) as f64
+                ))
+                .collect::<String>()
+        ),
+        None,
+    )
+    .unwrap();
+    let bindings = (0..=MAX_SESSION_BINDINGS)
+        .map(|index| {
+            (
+                index as u16,
+                TunedDegree::new(&tuning, index as u16).unwrap(),
+            )
+        })
+        .collect();
+    let manifest = SessionManifest {
+        session: 55,
+        epoch: 1,
+        namespace,
+        actor: owner,
+        bindings,
+    };
+    let (presentation, _) =
+        presentation_for(&manifest, &replica.snapshot().history, root, &owner_key);
+    assert_eq!(
+        accept_manifest(manifest, &presentation, &replica.snapshot().history, root),
+        Err(SessionOpenError::TooManyBindings)
     );
 }

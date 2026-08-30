@@ -11,7 +11,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::facets::{Envelope, MAX_ENV_LEVEL, MAX_ENV_POINTS};
-use crate::tuning::{MAX_SCALE_DEGREES, TunedDegree, TuningDefinition};
+use crate::roundtable::RoundTableConfig;
+use crate::tuning::{MAX_SCALE_DEGREES, TunedDegree, TunedPeriodicPitch, TuningDefinition};
 
 /// The music operation. Degrees are a tuning-scoped add-wins set; envelopes are
 /// per-degree causal-maxima registers; the tuning is a room-wide register. All
@@ -28,6 +29,14 @@ pub enum MusicOp {
     SetEnvelope { degree: TunedDegree, env: Envelope },
     /// Canonical room-wide tuning definition (register; causal-maxima resolved).
     SetTuning { definition: TuningDefinition },
+    /// Room-wide musical parameters for the round-table bass performance.
+    /// Running state and turns remain ephemeral session messages.
+    SetRoundTable { config: RoundTableConfig },
+    /// Assert one absolute tuning-scoped pitch into the shared pitch set.
+    AddPitch { pitch: TunedPeriodicPitch },
+    /// Retract every causally-observed add of this absolute pitch. Any room
+    /// member may do this; a concurrent add survives (observed-remove set).
+    RemovePitch { pitch: TunedPeriodicPitch },
 }
 
 /// Wire well-formedness for one [`MusicOp`] — bounds only, run once at ingress.
@@ -68,6 +77,13 @@ pub fn validate(op: &MusicOp) -> Result<(), String> {
             .validate("signed room tuning")
             .map(|_| ())
             .map_err(|error| error.to_string()),
+        MusicOp::SetRoundTable { config } => config
+            .validate()
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        MusicOp::AddPitch { pitch } | MusicOp::RemovePitch { pitch } => {
+            validate_degree(pitch.degree())
+        }
     }
 }
 

@@ -55,13 +55,17 @@ fn render_view_chord(view: &MusicView) -> Vec<i16> {
     let before = BTreeSet::new();
     let after = view.live.clone();
     let mut pcm = Vec::new();
-    for ev in degrees_to_amy_events(&before, &after, &view.envelopes, &tuning, music::MAX_OSCS) {
+    for ev in degrees_to_amy_events(&before, &after, &view.envelopes, &tuning, music::MAX_OSCS)
+        .expect("31-EDO view fits the AMY oscillator pool")
+    {
         amy.send(&ev);
     }
     for _ in 0..HELD_BLOCKS {
         pcm.extend_from_slice(&amy.render_block());
     }
-    for ev in degrees_to_amy_events(&after, &before, &view.envelopes, &tuning, music::MAX_OSCS) {
+    for ev in degrees_to_amy_events(&after, &before, &view.envelopes, &tuning, music::MAX_OSCS)
+        .expect("31-EDO view fits the AMY oscillator pool")
+    {
         amy.send(&ev);
     }
     for _ in 0..TAIL_BLOCKS {
@@ -259,14 +263,16 @@ fn envelope_convergence_drives_and_shapes_audio() {
         &v1.envelopes,
         &tuning,
         music::MAX_OSCS,
-    );
+    )
+    .expect("31-EDO view fits the AMY oscillator pool");
     let wire2 = degrees_to_amy_events(
         &BTreeSet::new(),
         &v2.live,
         &v2.envelopes,
         &tuning,
         music::MAX_OSCS,
-    );
+    )
+    .expect("31-EDO view fits the AMY oscillator pool");
     assert_eq!(
         wire1, wire2,
         "equal views must project a byte-identical wire stream"

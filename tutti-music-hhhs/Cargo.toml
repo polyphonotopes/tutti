@@ -2,7 +2,7 @@
 name = "tutti-music-hhhs"
 version = "0.4.4"
 edition = "2024"
-rust-version = "1.97.1"
+rust-version = "1.95"
 description = "Capability-native HHHS Replica protocol for tutti-music"
 license = "MIT OR Apache-2.0"
 

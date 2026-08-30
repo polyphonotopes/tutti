@@ -1,0 +1,11 @@
+[package]
+name = "tutti-realtime"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Compact carrier-independent realtime frames for Tutti sessions"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+thiserror = "2.0"
+tutti-roundtable = { path = "../tutti-roundtable" }

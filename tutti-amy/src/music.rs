@@ -390,7 +390,8 @@ pub fn drive_amy(
     // Drive each real fold output.
     for degrees in fold_timeline {
         let cur = to_degrees(degrees);
-        let evs = degrees_to_amy_events(&prev, &cur, &no_envelopes, tuning, MAX_OSCS);
+        let evs = degrees_to_amy_events(&prev, &cur, &no_envelopes, tuning, MAX_OSCS)
+            .expect("room live set fits the AMY oscillator pool");
         for ev in &evs {
             amy.send(ev);
         }
@@ -402,7 +403,8 @@ pub fn drive_amy(
     // Teardown: release everything still sounding → silence (the no-stuck-note
     // discipline applied end to end — fail to silence).
     let empty = BTreeSet::new();
-    let evs = degrees_to_amy_events(&prev, &empty, &no_envelopes, tuning, MAX_OSCS);
+    let evs = degrees_to_amy_events(&prev, &empty, &no_envelopes, tuning, MAX_OSCS)
+        .expect("room live set fits the AMY oscillator pool");
     for ev in &evs {
         amy.send(ev);
     }
@@ -605,7 +607,9 @@ pub fn render_held_with_envelope(
     let after = BTreeSet::from([d]);
 
     let mut pcm = Vec::new();
-    for ev in degrees_to_amy_events(&before, &after, &envs, tuning, MAX_OSCS) {
+    for ev in degrees_to_amy_events(&before, &after, &envs, tuning, MAX_OSCS)
+        .expect("single degree fits the AMY oscillator pool")
+    {
         amy.send(&ev);
     }
     let mut held_rms = Vec::with_capacity(held_blocks);
@@ -614,7 +618,9 @@ pub fn render_held_with_envelope(
         held_rms.push(rms(&block));
         pcm.extend_from_slice(&block);
     }
-    for ev in degrees_to_amy_events(&after, &before, &envs, tuning, MAX_OSCS) {
+    for ev in degrees_to_amy_events(&after, &before, &envs, tuning, MAX_OSCS)
+        .expect("single degree fits the AMY oscillator pool")
+    {
         amy.send(&ev);
     }
     for _ in 0..tail_blocks {
@@ -637,6 +643,7 @@ pub fn envelope_note_on_wire(pc: u16, env: &Envelope, tuning: &Tuning) -> Vec<St
         tuning,
         MAX_OSCS,
     )
+    .expect("single degree fits the AMY oscillator pool")
 }
 
 /// Least-squares slope of a per-block RMS series vs. block index (RMS units per

@@ -34,7 +34,10 @@ pub mod lang;
 #[cfg(feature = "legacy-source-log")]
 pub mod net;
 pub mod ops;
+pub mod presence;
 pub mod render;
+pub mod roundtable;
+pub mod shared_set;
 pub mod tuning;
 
 pub use facets::{Envelope, Interp};
@@ -43,6 +46,10 @@ pub use lang::{MusicLang, MusicView};
 #[cfg(feature = "legacy-source-log")]
 pub use net::{LANE_STRATEGY_VERSION, MUSIC_COURIER_ALPN, MUSIC_RBSR_ALPN, MUSIC_STRATEGY_NAME};
 pub use ops::MusicOp;
+pub use roundtable::{
+    RoundTableConfig, RoundTableInputGate, RoundTablePattern, RoundTablePitchMode, RoundTableScale,
+};
+pub use shared_set::SharedPitchSet;
 pub use tuning::{TunedDegree, TunedPeriodicPitch, Tuning, TuningDefinition, TuningId};
 
 /// Legacy source-log author identity.

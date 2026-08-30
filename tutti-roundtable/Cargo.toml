@@ -1,0 +1,11 @@
+[package]
+name = "tutti-roundtable"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Bounded live-session model for Tutti round-table performances"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tutti-music = { path = "../tutti-music" }
+thiserror = "2.0"

@@ -1,0 +1,10 @@
+[package]
+name = "tutti-amy-wire"
+version = "0.4.4"
+edition = "2024"
+rust-version = "1.95"
+description = "Pure Tutti music-view to AMY wire projection"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tutti-music = { path = "../tutti-music" }

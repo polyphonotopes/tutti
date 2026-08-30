@@ -27,6 +27,7 @@ hhhs-sync = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs.g
 # alternate source log, materializer, or network runtime.
 tutti-music = { path = "../tutti-music" }
 tutti-music-hhhs = { path = "../tutti-music-hhhs" }
+tutti-amy-wire = { path = "../tutti-amy-wire" }
 serde = { version = "1.0", features = ["derive"] }
 
 [build-dependencies]

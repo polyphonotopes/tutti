@@ -8,7 +8,9 @@ use tutti_core::{AuthorId, EntryHash, FoldCtx, OpLanguage, causal_maxima};
 use crate::facets::Envelope;
 use crate::fold::{SetOp, add_wins_set, register, registers};
 use crate::ops::{MusicOp, validate_wire};
-use crate::tuning::{TunedDegree, TuningDefinition};
+use crate::roundtable::RoundTableConfig;
+use crate::shared_set::SharedPitchSet;
+use crate::tuning::{TunedDegree, TunedPeriodicPitch, TuningDefinition};
 
 /// The materialized music read model: the live pitch-set, its holders, the
 /// per-degree envelope registers, and the resolved room tuning.
@@ -27,10 +29,15 @@ pub struct MusicView {
     pub live: BTreeSet<TunedDegree>,
     /// For each live degree, the authors holding a live add of it.
     pub holders: BTreeMap<TunedDegree, BTreeSet<AuthorId>>,
+    pub live_pitches: BTreeSet<TunedPeriodicPitch>,
+    pub pitch_holders: BTreeMap<TunedPeriodicPitch, BTreeSet<AuthorId>>,
     /// Per-degree envelope facets, each a causal-maxima register.
     pub envelopes: BTreeMap<TunedDegree, Envelope>,
     /// The resolved room tuning (register; built-in 12-TET when unset).
     pub tuning: TuningDefinition,
+    /// Resolved room-wide round-table musical settings.
+    pub round_table: RoundTableConfig,
+    pub shared_pitches: SharedPitchSet,
 }
 
 impl Default for MusicView {
@@ -38,8 +45,12 @@ impl Default for MusicView {
         Self {
             live: BTreeSet::new(),
             holders: BTreeMap::new(),
+            live_pitches: BTreeSet::new(),
+            pitch_holders: BTreeMap::new(),
             envelopes: BTreeMap::new(),
             tuning: TuningDefinition::twelve_tet(),
+            round_table: RoundTableConfig::default(),
+            shared_pitches: SharedPitchSet::default(),
         }
     }
 }
@@ -56,9 +67,9 @@ impl OpLanguage for MusicLang {
     /// compile-time EDO to tuning-scoped [`TunedDegree`] + the in-log
     /// [`MusicOp::SetTuning`] register — bumped once, while the protocol had
     /// zero deployed history.
-    const SCHEMA_VERSION: u16 = 3;
-    const ENTRY_FRAME_MAGIC: &'static [u8] = b"tutti.music.entry/2";
-    const WIRE_MAGIC: &'static [u8] = b"tutti.music.wire/2\0";
+    const SCHEMA_VERSION: u16 = 6;
+    const ENTRY_FRAME_MAGIC: &'static [u8] = b"tutti.music.entry/5";
+    const WIRE_MAGIC: &'static [u8] = b"tutti.music.wire/5\0";
     const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 
     fn validate_wire(op: &MusicOp) -> Result<(), String> {
@@ -76,11 +87,18 @@ impl OpLanguage for MusicLang {
         })
         .unwrap_or_else(TuningDefinition::twelve_tet);
 
+        let round_table = register(ctx, |decoded| match decoded.op() {
+            MusicOp::SetRoundTable { config } => Some(*config),
+            _ => None,
+        })
+        .unwrap_or_default();
+
         // A register winner was wire-validated at ingress, so this is purely
         // defensive: an unusable tuning yields an empty view under it.
         let Ok(active) = tuning.validate("active room tuning") else {
             return MusicView {
                 tuning,
+                round_table,
                 ..MusicView::default()
             };
         };
@@ -95,6 +113,16 @@ impl OpLanguage for MusicLang {
             _ => None,
         });
 
+        let pitches = add_wins_set(ctx, |decoded| match decoded.op() {
+            MusicOp::AddPitch { pitch } if pitch.validate(&active).is_ok() => {
+                Some(SetOp::Add(*pitch))
+            }
+            MusicOp::RemovePitch { pitch } if pitch.validate(&active).is_ok() => {
+                Some(SetOp::Remove(*pitch))
+            }
+            _ => None,
+        });
+
         let envelopes = registers(ctx, |decoded| match decoded.op() {
             MusicOp::SetEnvelope { degree, env } if degree.validate(&active).is_ok() => {
                 Some((*degree, env.clone()))
@@ -102,11 +130,20 @@ impl OpLanguage for MusicLang {
             _ => None,
         });
 
+        let shared_pitches = SharedPitchSet {
+            pitch_classes: degrees.live.clone(),
+            pitches: pitches.live.clone(),
+        };
+
         MusicView {
             live: degrees.live,
             holders: degrees.holders,
+            live_pitches: pitches.live,
+            pitch_holders: pitches.holders,
             envelopes,
             tuning,
+            round_table,
+            shared_pitches,
         }
     }
 
@@ -130,6 +167,10 @@ impl OpLanguage for MusicLang {
         let mut removes: BTreeMap<TunedDegree, BTreeSet<EntryHash>> = BTreeMap::new();
         let mut env_writes: BTreeMap<TunedDegree, BTreeSet<EntryHash>> = BTreeMap::new();
         let mut tuning_writes: BTreeSet<EntryHash> = BTreeSet::new();
+        let mut round_table_writes: BTreeSet<EntryHash> = BTreeSet::new();
+        let mut pitch_adds: BTreeMap<(TunedPeriodicPitch, AuthorId), BTreeSet<EntryHash>> =
+            BTreeMap::new();
+        let mut pitch_removes: BTreeMap<TunedPeriodicPitch, BTreeSet<EntryHash>> = BTreeMap::new();
         for (entry, decoded) in ctx.decoded() {
             if !cut.contains(entry) {
                 continue;
@@ -148,6 +189,18 @@ impl OpLanguage for MusicLang {
                 }
                 MusicOp::SetTuning { .. } => {
                     tuning_writes.insert(*entry);
+                }
+                MusicOp::SetRoundTable { .. } => {
+                    round_table_writes.insert(*entry);
+                }
+                MusicOp::AddPitch { pitch } => {
+                    pitch_adds
+                        .entry((*pitch, decoded.author()))
+                        .or_default()
+                        .insert(*entry);
+                }
+                MusicOp::RemovePitch { pitch } => {
+                    pitch_removes.entry(*pitch).or_default().insert(*entry);
                 }
             }
         }
@@ -169,10 +222,27 @@ impl OpLanguage for MusicLang {
                 .collect();
             keep.extend(causal_maxima(ctx, &surviving));
         }
+        for key_removes in pitch_removes.values() {
+            keep.extend(causal_maxima(ctx, key_removes));
+        }
+        for ((pitch, _author), key_adds) in &pitch_adds {
+            let key_removes = pitch_removes.get(pitch);
+            let surviving: BTreeSet<EntryHash> = key_adds
+                .iter()
+                .copied()
+                .filter(|add| {
+                    key_removes.is_none_or(|removes| {
+                        !removes.iter().any(|remove| ctx.is_ancestor(add, remove))
+                    })
+                })
+                .collect();
+            keep.extend(causal_maxima(ctx, &surviving));
+        }
         for key_writes in env_writes.values() {
             keep.extend(causal_maxima(ctx, key_writes));
         }
         keep.extend(causal_maxima(ctx, &tuning_writes));
+        keep.extend(causal_maxima(ctx, &round_table_writes));
         keep
     }
 }
