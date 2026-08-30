@@ -126,11 +126,8 @@ impl RoundTablePattern {
         let canonical_note = base
             .checked_add(note % 12)
             .ok_or(RoundTableConfigError::Pattern)?;
-        if was_present {
-            canonical = canonical.toggled(canonical_note)?;
-        } else if !canonical.contains(canonical_note) {
-            canonical = canonical.toggled(canonical_note)?;
-        }
+        debug_assert_eq!(canonical.contains(canonical_note), was_present);
+        canonical = canonical.toggled(canonical_note)?;
         Ok(canonical)
     }
 

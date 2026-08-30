@@ -560,8 +560,10 @@ mod tests {
             nonce: 17,
             origin: id(1),
         };
-        let mut root = RoundTableConfig::default();
-        root.scale = RoundTableScale::Root;
+        let mut root = RoundTableConfig {
+            scale: RoundTableScale::Root,
+            ..RoundTableConfig::default()
+        };
         let mut chromatic = root;
         chromatic.scale = RoundTableScale::Chromatic;
         for mode in [RoundTablePitchMode::Ascending, RoundTablePitchMode::Random] {
@@ -637,8 +639,10 @@ mod tests {
             running: true,
             config: RoundTableConfig::default(),
         };
-        let mut conflicting = RoundTableConfig::default();
-        conflicting.center_millihz = 90_000;
+        let conflicting = RoundTableConfig {
+            center_millihz: 90_000,
+            ..RoundTableConfig::default()
+        };
         let stopped = resolve_run_state(
             Some(started),
             RunState {
