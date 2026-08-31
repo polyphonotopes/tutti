@@ -226,6 +226,251 @@ pub struct RepairAck {
     pub fin_sequence: u64,
 }
 
+/// Authenticated BLE close state for one HHHS repair attempt.
+///
+/// HHHS `Done`/`Ack` establishes the causal result; this state establishes
+/// that both BLE directions carried the complete terminal prefix. EOF,
+/// disconnect, queue acceptance, or a FIN for another attempt never closes an
+/// attempt successfully.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RepairCloseState {
+    attempt: RepairAttemptId,
+    local_terminal: bool,
+    local_last_repair_sequence: Option<u64>,
+    local_fin_sequence: Option<u64>,
+    local_fin_acked: bool,
+    remote_last_repair_sequence: Option<u64>,
+    remote_fin: Option<RepairFin>,
+    remote_fin_sequence: Option<u64>,
+    remote_ack_sequence: Option<u64>,
+    remote_ack_confirmed: bool,
+}
+
+impl RepairCloseState {
+    pub const fn new(attempt: RepairAttemptId) -> Self {
+        Self {
+            attempt,
+            local_terminal: false,
+            local_last_repair_sequence: None,
+            local_fin_sequence: None,
+            local_fin_acked: false,
+            remote_last_repair_sequence: None,
+            remote_fin: None,
+            remote_fin_sequence: None,
+            remote_ack_sequence: None,
+            remote_ack_confirmed: false,
+        }
+    }
+
+    pub const fn attempt(&self) -> RepairAttemptId {
+        self.attempt
+    }
+
+    pub const fn has_local_fin(&self) -> bool {
+        self.local_fin_sequence.is_some()
+    }
+
+    pub const fn has_remote_ack(&self) -> bool {
+        self.remote_ack_sequence.is_some()
+    }
+
+    pub const fn local_fin_pending(&self) -> bool {
+        self.local_terminal
+            && self.local_last_repair_sequence.is_some()
+            && self.local_fin_sequence.is_none()
+    }
+
+    pub fn remote_ack_pending(&self) -> bool {
+        self.local_terminal
+            && match self.remote_fin {
+                Some(fin) => {
+                    self.remote_last_repair_sequence == Some(fin.last_repair_sequence)
+                        && self.remote_ack_sequence.is_none()
+                }
+                None => false,
+            }
+    }
+
+    pub fn observe_local_repair(&mut self, sequence: u64) -> Result<(), RepairCloseError> {
+        if self.local_fin_sequence.is_some() {
+            return Err(RepairCloseError::RepairAfterFin);
+        }
+        if self
+            .local_last_repair_sequence
+            .is_some_and(|previous| sequence <= previous)
+        {
+            return Err(RepairCloseError::NonMonotonicRepairSequence);
+        }
+        self.local_last_repair_sequence = Some(sequence);
+        Ok(())
+    }
+
+    pub fn observe_remote_repair(&mut self, sequence: u64) -> Result<(), RepairCloseError> {
+        if self
+            .remote_last_repair_sequence
+            .is_some_and(|previous| sequence <= previous)
+        {
+            return Err(RepairCloseError::NonMonotonicRepairSequence);
+        }
+        if self
+            .remote_fin
+            .is_some_and(|fin| sequence > fin.last_repair_sequence)
+        {
+            return Err(RepairCloseError::RepairAfterFin);
+        }
+        self.remote_last_repair_sequence = Some(sequence);
+        Ok(())
+    }
+
+    pub fn mark_local_terminal(&mut self) {
+        self.local_terminal = true;
+    }
+
+    pub fn local_fin(&self) -> Result<RepairFin, RepairCloseError> {
+        if !self.local_terminal {
+            return Err(RepairCloseError::FinBeforeTerminal);
+        }
+        let last_repair_sequence = self
+            .local_last_repair_sequence
+            .ok_or(RepairCloseError::MissingRepairPrefix)?;
+        if self.local_fin_sequence.is_some() {
+            return Err(RepairCloseError::DuplicateFin);
+        }
+        Ok(RepairFin {
+            attempt: self.attempt,
+            last_repair_sequence,
+        })
+    }
+
+    pub fn observe_local_fin_encoded(&mut self, sequence: u64) -> Result<(), RepairCloseError> {
+        if !self.local_terminal {
+            return Err(RepairCloseError::FinBeforeTerminal);
+        }
+        if self.local_fin_sequence.is_some() {
+            return Err(RepairCloseError::DuplicateFin);
+        }
+        self.local_fin_sequence = Some(sequence);
+        Ok(())
+    }
+
+    pub fn observe_remote_fin(
+        &mut self,
+        fin: RepairFin,
+        fin_sequence: u64,
+    ) -> Result<(), RepairCloseError> {
+        if fin.attempt != self.attempt {
+            return Err(RepairCloseError::WrongAttempt);
+        }
+        if let Some(current) = self.remote_fin {
+            return if current == fin && self.remote_fin_sequence == Some(fin_sequence) {
+                Ok(())
+            } else {
+                Err(RepairCloseError::ConflictingFin)
+            };
+        }
+        if self
+            .remote_last_repair_sequence
+            .is_some_and(|sequence| sequence > fin.last_repair_sequence)
+        {
+            return Err(RepairCloseError::RepairAfterFin);
+        }
+        self.remote_fin = Some(fin);
+        self.remote_fin_sequence = Some(fin_sequence);
+        Ok(())
+    }
+
+    pub fn remote_ack(&self) -> Result<RepairAck, RepairCloseError> {
+        if !self.local_terminal {
+            return Err(RepairCloseError::FinBeforeTerminal);
+        }
+        let fin = self.remote_fin.ok_or(RepairCloseError::MissingRemoteFin)?;
+        if self.remote_last_repair_sequence != Some(fin.last_repair_sequence) {
+            return Err(RepairCloseError::MissingRepairPrefix);
+        }
+        if self.remote_ack_sequence.is_some() {
+            return Err(RepairCloseError::DuplicateAck);
+        }
+        Ok(RepairAck {
+            attempt: self.attempt,
+            fin_sequence: self
+                .remote_fin_sequence
+                .ok_or(RepairCloseError::MissingRemoteFin)?,
+        })
+    }
+
+    pub fn observe_remote_ack_encoded(&mut self, sequence: u64) -> Result<(), RepairCloseError> {
+        // Re-run the readiness checks so an ACK can never be recorded merely
+        // because a caller constructed the public value by hand.
+        let _ = self.remote_ack()?;
+        self.remote_ack_sequence = Some(sequence);
+        Ok(())
+    }
+
+    pub fn confirm_remote_ack_sent(&mut self, sequence: u64) -> Result<(), RepairCloseError> {
+        if self.remote_ack_sequence != Some(sequence) {
+            return Err(RepairCloseError::WrongAckSequence);
+        }
+        self.remote_ack_confirmed = true;
+        Ok(())
+    }
+
+    pub fn observe_local_fin_ack(&mut self, ack: RepairAck) -> Result<(), RepairCloseError> {
+        if ack.attempt != self.attempt {
+            return Err(RepairCloseError::WrongAttempt);
+        }
+        if self.local_fin_sequence != Some(ack.fin_sequence) {
+            return Err(RepairCloseError::WrongAckSequence);
+        }
+        self.local_fin_acked = true;
+        Ok(())
+    }
+
+    pub const fn is_confirmed_closed(&self) -> bool {
+        self.local_terminal
+            && self.local_fin_acked
+            && self.remote_fin.is_some()
+            && self.remote_ack_confirmed
+    }
+}
+
+/// Derive the carrier attempt identity from the authenticated link placement
+/// and the byte-exact HHHS opening frame. Both endpoints therefore agree
+/// without adding an unauthenticated repair-begin message.
+pub fn repair_attempt_id(session_id: u64, opening_frame: &[u8]) -> RepairAttemptId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tutti BLE HHHS repair attempt v1");
+    hasher.update(&session_id.to_be_bytes());
+    hasher.update(opening_frame);
+    let digest = hasher.finalize();
+    let mut attempt = [0; REPAIR_ATTEMPT_ID_BYTES];
+    attempt.copy_from_slice(&digest.as_bytes()[..REPAIR_ATTEMPT_ID_BYTES]);
+    RepairAttemptId::new(attempt)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
+pub enum RepairCloseError {
+    #[error("repair lifecycle message belongs to another attempt")]
+    WrongAttempt,
+    #[error("repair sequence did not advance monotonically")]
+    NonMonotonicRepairSequence,
+    #[error("repair frame arrived after FIN")]
+    RepairAfterFin,
+    #[error("repair FIN was requested before the HHHS attempt became terminal")]
+    FinBeforeTerminal,
+    #[error("repair attempt has no authenticated frame prefix")]
+    MissingRepairPrefix,
+    #[error("repair FIN is duplicated")]
+    DuplicateFin,
+    #[error("repair FIN conflicts with the previously authenticated FIN")]
+    ConflictingFin,
+    #[error("remote repair FIN has not arrived")]
+    MissingRemoteFin,
+    #[error("repair ACK is duplicated")]
+    DuplicateAck,
+    #[error("repair ACK names another authenticated FIN sequence")]
+    WrongAckSequence,
+}
+
 /// Leaf acknowledgement that the exact receiver-bound bundle was imported,
 /// every selected leaf is available, and the current device identity matches
 /// the receiver proven by the authenticated session.
@@ -480,6 +725,12 @@ pub struct AuthenticatedMessage {
     pub payload: Vec<u8>,
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EncodedAuthenticatedMessage {
+    pub sequence: u64,
+    pub wire: Vec<u8>,
+}
+
 /// Stateful authenticated codec for one established BLE connection.
 ///
 /// Sequence numbers and the replay window are directional. Create one codec
@@ -533,6 +784,18 @@ impl SessionCodec {
     }
 
     pub fn encode(&mut self, lane: Lane, payload: &[u8]) -> Result<Vec<u8>, BleWireError> {
+        self.encode_with_sequence(lane, payload)
+            .map(|message| message.wire)
+    }
+
+    /// Encode one authenticated message while retaining the sequence needed
+    /// by repair FIN/Ack fencing. The sequence is carrier metadata and never
+    /// enters HHHS canonical or repair-frame bytes.
+    pub fn encode_with_sequence(
+        &mut self,
+        lane: Lane,
+        payload: &[u8],
+    ) -> Result<EncodedAuthenticatedMessage, BleWireError> {
         if payload.len() > self.max_payload_bytes {
             return Err(BleWireError::PayloadTooLarge {
                 actual: payload.len(),
@@ -560,7 +823,10 @@ impl SessionCodec {
         bytes.extend_from_slice(payload);
         let tag = self.keys.authenticate(&bytes);
         bytes.extend_from_slice(&tag);
-        Ok(bytes)
+        Ok(EncodedAuthenticatedMessage {
+            sequence,
+            wire: bytes,
+        })
     }
 
     pub fn decode(&mut self, bytes: &[u8]) -> Result<AuthenticatedMessage, BleWireError> {
@@ -1330,6 +1596,114 @@ mod tests {
             decode_control_frame(&unknown),
             Err(BleWireError::UnknownControlFrame(0xff))
         ));
+    }
+
+    #[test]
+    fn repair_attempt_identity_binds_link_and_opening_frame() {
+        let first = repair_attempt_id(7, b"hhhs hello");
+        assert_eq!(first, repair_attempt_id(7, b"hhhs hello"));
+        assert_ne!(first, repair_attempt_id(8, b"hhhs hello"));
+        assert_ne!(first, repair_attempt_id(7, b"another hello"));
+    }
+
+    #[test]
+    fn repair_close_requires_both_terminal_prefixes_and_confirmed_acks() {
+        let attempt = repair_attempt_id(17, b"opening");
+        let mut left = RepairCloseState::new(attempt);
+        let mut right = RepairCloseState::new(attempt);
+
+        left.observe_local_repair(10).unwrap();
+        right.observe_remote_repair(10).unwrap();
+        right.observe_local_repair(11).unwrap();
+        left.observe_remote_repair(11).unwrap();
+        left.mark_local_terminal();
+        right.mark_local_terminal();
+
+        let left_fin = left.local_fin().unwrap();
+        left.observe_local_fin_encoded(12).unwrap();
+        right.observe_remote_fin(left_fin, 12).unwrap();
+        let right_fin = right.local_fin().unwrap();
+        right.observe_local_fin_encoded(13).unwrap();
+        left.observe_remote_fin(right_fin, 13).unwrap();
+
+        let left_ack = left.remote_ack().unwrap();
+        left.observe_remote_ack_encoded(14).unwrap();
+        let right_ack = right.remote_ack().unwrap();
+        right.observe_remote_ack_encoded(15).unwrap();
+        right.observe_local_fin_ack(left_ack).unwrap();
+        left.observe_local_fin_ack(right_ack).unwrap();
+
+        assert!(!left.is_confirmed_closed());
+        assert!(!right.is_confirmed_closed());
+        left.confirm_remote_ack_sent(14).unwrap();
+        right.confirm_remote_ack_sent(15).unwrap();
+        assert!(left.is_confirmed_closed());
+        assert!(right.is_confirmed_closed());
+    }
+
+    #[test]
+    fn repair_close_refuses_early_stale_and_truncated_lifecycle_messages() {
+        let attempt = RepairAttemptId::new([0x31; REPAIR_ATTEMPT_ID_BYTES]);
+        let other = RepairAttemptId::new([0x32; REPAIR_ATTEMPT_ID_BYTES]);
+        let mut state = RepairCloseState::new(attempt);
+        state.observe_local_repair(4).unwrap();
+        assert_eq!(state.local_fin(), Err(RepairCloseError::FinBeforeTerminal));
+        state.mark_local_terminal();
+        assert_eq!(
+            state.observe_remote_fin(
+                RepairFin {
+                    attempt: other,
+                    last_repair_sequence: 8,
+                },
+                9,
+            ),
+            Err(RepairCloseError::WrongAttempt)
+        );
+
+        state.observe_remote_repair(7).unwrap();
+        state
+            .observe_remote_fin(
+                RepairFin {
+                    attempt,
+                    last_repair_sequence: 8,
+                },
+                9,
+            )
+            .unwrap();
+        assert_eq!(
+            state.remote_ack(),
+            Err(RepairCloseError::MissingRepairPrefix)
+        );
+        assert_eq!(
+            state.observe_remote_repair(9),
+            Err(RepairCloseError::RepairAfterFin)
+        );
+        assert_eq!(
+            state.observe_local_fin_ack(RepairAck {
+                attempt,
+                fin_sequence: 99,
+            }),
+            Err(RepairCloseError::WrongAckSequence)
+        );
+    }
+
+    #[test]
+    fn duplicate_local_fin_is_failure_atomic() {
+        let attempt = RepairAttemptId::new([0x41; REPAIR_ATTEMPT_ID_BYTES]);
+        let mut state = RepairCloseState::new(attempt);
+        state.observe_local_repair(4).unwrap();
+        state.mark_local_terminal();
+        state.observe_local_fin_encoded(5).unwrap();
+        assert_eq!(
+            state.observe_local_fin_encoded(6),
+            Err(RepairCloseError::DuplicateFin)
+        );
+        state
+            .observe_local_fin_ack(RepairAck {
+                attempt,
+                fin_sequence: 5,
+            })
+            .expect("duplicate refusal must preserve the original FIN sequence");
     }
 
     #[test]
