@@ -199,6 +199,11 @@ fn round_table_settings_converge_as_durable_hhhs_state() {
     let first_view = materialize_open(&first.snapshot().history, namespace);
     let second_view = materialize_open(&second.snapshot().history, namespace);
     assert_eq!(first_view.round_table, second_view.round_table);
-    assert!([left, right].contains(&first_view.round_table));
+    let mut left_settings = left;
+    left_settings.pattern = RoundTableConfig::default().pattern.cleared();
+    let mut right_settings = right;
+    right_settings.pattern = RoundTableConfig::default().pattern.cleared();
+    assert!([left_settings, right_settings].contains(&first_view.round_table));
+    assert!(first_view.round_table.pattern.is_empty());
     assert_eq!(root(&first), root(&second));
 }

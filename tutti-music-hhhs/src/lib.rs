@@ -189,6 +189,16 @@ pub fn encode_command(
     presented: &[EntryHash],
     command: MusicOp,
 ) -> Result<Vec<u8>, CommandCodecError> {
+    // Pitch membership has one authority: Add/RemoveDegree/Pitch. The legacy
+    // RoundTableConfig field remains in the shared data type for compact
+    // board/UI compatibility, but newly authored durable settings records
+    // never carry a second pitch-set representation.
+    let command = match command {
+        MusicOp::SetRoundTable { config } => MusicOp::SetRoundTable {
+            config: round_table_settings(config),
+        },
+        command => command,
+    };
     encode_envelope(&CommandEnvelope {
         generation: PROTOCOL_GENERATION,
         namespace: *namespace.as_bytes(),
@@ -1525,6 +1535,24 @@ mod tests {
             replica.max_replica_record_bytes(),
             vocabulary.max_replica_record_bytes
         );
+    }
+
+    #[test]
+    fn round_table_command_encoding_never_authors_a_second_pitch_set() {
+        let namespace = Digest::of(b"round-table settings have one pitch authority");
+        let actor = ActorId::from_bytes([0x66; 32]);
+        let mut config = RoundTableConfig::default();
+        config.pattern = config.pattern.toggled(60).unwrap().toggled(64).unwrap();
+        config.center_millihz = 96_000;
+
+        let encoded =
+            encode_command(namespace, actor, &[], MusicOp::SetRoundTable { config }).unwrap();
+        let decoded = decode_command(&encoded).unwrap();
+        let MusicOp::SetRoundTable { config: stored } = decoded.command else {
+            panic!("round-table command changed variant");
+        };
+        assert!(stored.pattern.is_empty());
+        assert_eq!(stored.center_millihz, 96_000);
     }
 
     #[test]
