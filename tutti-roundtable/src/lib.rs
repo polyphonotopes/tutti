@@ -19,7 +19,9 @@ const MAGIC: [u8; 4] = *b"TRT3";
 const KIND_RUN: u8 = 1;
 const KIND_PULSE: u8 = 2;
 const KIND_CONFIG: u8 = 3;
+const KIND_CONFIG_SNAPSHOT: u8 = 4;
 const CONFIG_BYTES: usize = 4 + 1 + 4 + 1 + 1 + 2 + 2 + 2 + 1 + 16;
+const CONFIG_SNAPSHOT_BYTES: usize = CONFIG_BYTES + 8;
 const RUN_BYTES: usize = 4 + 1 + 8 + 32 + 8 + 32 + 1 + (CONFIG_BYTES - 5);
 const PULSE_BYTES: usize = 4 + 1 + 8 + 32 + 4 + 32 + 4 + 2 + 2;
 pub const MAX_FRAME_BYTES: usize = if RUN_BYTES > PULSE_BYTES {
@@ -105,6 +107,17 @@ pub struct ConfigState {
     pub config: RoundTableConfig,
 }
 
+/// Passive, revision-fenced materialization from one authenticated endpoint.
+///
+/// This is deliberately distinct from [`ConfigState`]: a snapshot confirms or
+/// reports state, while `ConfigState` requests a state change. Receivers reset
+/// the revision fence when the authenticated endpoint/session changes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ConfigSnapshot {
+    pub revision: u64,
+    pub config: RoundTableConfig,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Pulse {
     pub epoch: RunEpoch,
@@ -120,6 +133,7 @@ pub enum Frame {
     Run(RunState),
     Pulse(Pulse),
     Config(ConfigState),
+    ConfigSnapshot(ConfigSnapshot),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
@@ -172,6 +186,15 @@ pub fn encode(frame: Frame) -> EncodedFrame {
             encoded.bytes[4] = KIND_CONFIG;
             encode_config(config.config, &mut encoded.bytes[5..CONFIG_BYTES]);
             encoded.len = CONFIG_BYTES as u8;
+        }
+        Frame::ConfigSnapshot(snapshot) => {
+            encoded.bytes[4] = KIND_CONFIG_SNAPSHOT;
+            encoded.bytes[5..13].copy_from_slice(&snapshot.revision.to_be_bytes());
+            encode_config(
+                snapshot.config,
+                &mut encoded.bytes[13..CONFIG_SNAPSHOT_BYTES],
+            );
+            encoded.len = CONFIG_SNAPSHOT_BYTES as u8;
         }
     }
     encoded
@@ -299,6 +322,14 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, FrameError> {
         (Some(&KIND_CONFIG), CONFIG_BYTES) => Ok(Frame::Config(ConfigState {
             config: decode_config(&bytes[5..CONFIG_BYTES])?,
         })),
+        (Some(&KIND_CONFIG_SNAPSHOT), CONFIG_SNAPSHOT_BYTES) => {
+            Ok(Frame::ConfigSnapshot(ConfigSnapshot {
+                revision: u64::from_be_bytes(
+                    bytes[5..13].try_into().map_err(|_| FrameError::Malformed)?,
+                ),
+                config: decode_config(&bytes[13..CONFIG_SNAPSHOT_BYTES])?,
+            }))
+        }
         _ => Err(FrameError::Malformed),
     }
 }
@@ -477,6 +508,10 @@ mod tests {
                 duration_ms: 500,
             }),
             Frame::Config(ConfigState {
+                config: RoundTableConfig::default(),
+            }),
+            Frame::ConfigSnapshot(ConfigSnapshot {
+                revision: 42,
                 config: RoundTableConfig::default(),
             }),
         ];

@@ -23,6 +23,7 @@ const ANSWER_KIND: u8 = 2;
 const OFFER_DOMAIN: &[u8] = b"tutti authenticated session offer v1\0";
 const ANSWER_DOMAIN: &[u8] = b"tutti authenticated session answer v1\0";
 const KEY_DOMAIN: &str = "tutti authenticated session keys v1";
+const EXPORT_DOMAIN: &[u8] = b"tutti authenticated session directional exporter v1\0";
 const TAG_DOMAIN: &[u8] = b"tutti authenticated channel frame v1\0";
 pub const TAG_BYTES: usize = 16;
 pub const OFFER_BYTES: usize = 4 + 1 + 8 + 32 + 32 + 32 + 32 + 64;
@@ -386,6 +387,58 @@ impl SessionKeys {
         }
         Ok(())
     }
+
+    /// Derive one pair of direction-specific secrets for a higher-level
+    /// protocol bound to `context`.
+    ///
+    /// This is the only supported bridge from the authenticated ephemeral
+    /// X25519 handshake into another packet-protection protocol. Callers must
+    /// bind the exact higher-level manifest and carrier channel; the original
+    /// handshake keys are never exposed. The returned material is deliberately
+    /// not `Clone` and is erased when dropped.
+    pub fn export_directional(&self, context: &[u8]) -> DirectionalSecrets {
+        let derive = |key: &[u8; 32]| {
+            let mut hasher = Hasher::new_keyed(key);
+            hasher.update(EXPORT_DOMAIN);
+            hasher.update(&self.session_id.to_be_bytes());
+            hasher.update(&(context.len() as u64).to_be_bytes());
+            hasher.update(context);
+            *hasher.finalize().as_bytes()
+        };
+        DirectionalSecrets {
+            // `self.send` is the remote's `self.receive` (and vice versa).
+            // The underlying transcript keys already separate directions, so
+            // a role-local "send"/"receive" label would incorrectly make the
+            // two ends derive different packet keys for the same lane.
+            send: derive(&self.send),
+            receive: derive(&self.receive),
+        }
+    }
+}
+
+/// Erasable directional output from one authenticated key-establishment
+/// transcript. It is intended to be consumed immediately by the negotiated
+/// packet-protection implementation.
+pub struct DirectionalSecrets {
+    send: [u8; 32],
+    receive: [u8; 32],
+}
+
+impl DirectionalSecrets {
+    pub fn take_send(&mut self) -> [u8; 32] {
+        std::mem::take(&mut self.send)
+    }
+
+    pub fn take_receive(&mut self) -> [u8; 32] {
+        std::mem::take(&mut self.receive)
+    }
+}
+
+impl Drop for DirectionalSecrets {
+    fn drop(&mut self) {
+        self.send.zeroize();
+        self.receive.zeroize();
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -561,6 +614,24 @@ mod tests {
         initiator
             .verify(reply, &responder.authenticate(reply))
             .unwrap();
+
+        let context = b"exact hhhs manifest digest plus channel binding";
+        let mut initiator_export = initiator.export_directional(context);
+        let mut responder_export = responder.export_directional(context);
+        assert_eq!(
+            initiator_export.take_send(),
+            responder_export.take_receive()
+        );
+        assert_eq!(
+            initiator_export.take_receive(),
+            responder_export.take_send()
+        );
+        assert_ne!(
+            initiator.export_directional(context).take_send(),
+            initiator
+                .export_directional(b"another hhhs manifest")
+                .take_send()
+        );
     }
 
     fn responder_identity() -> PeerIdentity {

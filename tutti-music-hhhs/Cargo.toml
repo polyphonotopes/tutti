@@ -8,11 +8,13 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 tutti-music = { path = "../tutti-music" }
-hhhs = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.4" }
-hhhs-cap = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.4" }
-hhhs-proof = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.4" }
-hhhs-replica = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.4" }
-hhhs-store = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.4" }
+hhhs = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55" }
+hhhs-cap = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55" }
+hhhs-proof = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55" }
+hhhs-replica = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55" }
+hhhs-session = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55" }
+hhhs-store = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55" }
+hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
@@ -20,4 +22,5 @@ thiserror = "2.0"
 [dev-dependencies]
 blake3 = "=1.8.5"
 futures = "0.3"
-hhhs-sync = { version = "0.4.4", git = "https://gitlab.com/micahscopes/hhhs-rs.git", tag = "v0.4.4", features = ["driver"] }
+hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55", features = ["driver"] }
+hhhs-session = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55", features = ["replica", "xchacha20poly1305"] }

@@ -1,500 +1,612 @@
-//! Executable design probe for a capability-authorized realtime music session.
+//! End-to-end Tutti qualification of the upstream hhhs-session fast path.
 //!
-//! This is intentionally a model, not a public packet API. It fixes the seam
-//! between the fast and durable planes while leaving the eventual session
-//! crate, key agreement, AEAD, replay window, MIDI 2.0/UMP vocabulary, and
-//! expiry policy open to measurement and review.
-//!
-//! The invariants exercised here are the durable contract:
-//!
-//! - one HHHS capability presentation authorizes a bounded session transcript;
-//! - the transcript binds the namespace, actor, epoch, and compact bindings;
-//! - short authenticated frames can project immediately without becoming HHHS
-//!   entries one-for-one;
-//! - the same binding maps to an ordinary `MusicOp` for durable admission;
-//! - exact durable state confirms or corrects the fast projection; and
-//! - Replica repair remains the convergence authority after loss or reconnect.
+//! The session predicts compact authenticated pitch-set edits, then reifies
+//! the exact edits through the ordinary Tutti music Replica. Durable
+//! materialization and repair remain authoritative. There is deliberately no
+//! Tutti-local session manifest, replay window, packet MAC, or recovery state
+//! machine in this test.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use futures::executor::block_on;
-use hhhs::{DagRead, DagSnapshot, Digest, Encoder, EntryHash};
-use hhhs_cap::{AuthorizationDecision, CapabilitySnapshot, Right};
-use hhhs_proof::{
-    Ed25519Verifier, PresentationContext, PresentationEnvelope, PresentationVerifier, SigningKey,
+use hhhs::{DagRead, Digest, EntryHash};
+use hhhs_cap::{Area, CapabilitySnapshot, Receiver, Right};
+use hhhs_proof::{Ed25519Verifier, SigningKey};
+use hhhs_replica::{AdmissionRequest, ReplicaRecord, ReplicaRepairHost};
+use hhhs_session::{
+    AllowedMessageClasses, CausalContext, CausalReadiness, DirectedSessionBinding,
+    DurableProjection, DurableProjectionHorizon, EventClass, FoundationProfileId,
+    ProjectionGeneration, ReplayDisposition, SeatFoundationClaim, SessionAdmission,
+    SessionEffectCode, SessionEffectInstruction, SessionEffectIntent, SessionEffectKind,
+    SessionEffectLedger, SessionEvent, SessionEventCode, SessionKeyEpoch, SessionLeaseTime,
+    SessionManifest, SessionPolicy, SessionProjectionChange, SessionProjectionHost,
+    SessionProjector, SessionReceiverLane, SessionSeat, SessionSenderLane, SimulationTime,
+    VerifiedSeatFoundation, XChaCha20Poly1305Key, XChaCha20Poly1305Profile,
+    XChaChaCompactPacketCodec, XChaChaCounterNonceSource, authorize_session,
+    xchacha20poly1305_profile_id,
 };
-use hhhs_replica::{ReplicaRepairHost, ReplicaRepairSnapshot};
-use hhhs_store::MemoryStorage;
-use hhhs_sync::{EntrySource, RepairHost, entry_set_root};
-use tutti_music::{MusicOp, TunedDegree, Tuning};
+use hhhs_store::{MemoryStorage, history_root};
+use hhhs_sync::{EntrySource, RepairHost, Snapshot};
+use tutti_music::{MusicOp, SharedPitchSet, TunedDegree, Tuning};
 use tutti_music_hhhs::{
-    ActorId, MusicReplica, MusicView, author, delegate, initialize, materialize, notes_area,
+    ActorId, MusicReplica, delegate, encode_command, initialize, materialize, notes_area,
 };
 
-const SESSION_TRANSCRIPT_DOMAIN: &[u8] = b"tutti realtime session model v1";
-const FRAME_MAGIC: [u8; 2] = *b"TS";
-const FRAME_VERSION: u8 = 1;
-const FRAME_BODY_BYTES: usize = 23;
-const FRAME_TAG_BYTES: usize = 16;
-const FRAME_BYTES: usize = FRAME_BODY_BYTES + FRAME_TAG_BYTES;
-const MAX_SESSION_BINDINGS: usize = 128;
+const ADD_DEGREE: SessionEventCode = SessionEventCode::new(1);
+const REMOVE_DEGREE: SessionEventCode = SessionEventCode::new(2);
+const DEGREE: u8 = 6;
+const MAX_MESSAGE_BYTES: usize = 2_048;
+const EVENT_CAPACITY: usize = 16;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SessionManifest {
-    session: u64,
-    epoch: u32,
-    namespace: Digest,
-    actor: ActorId,
-    bindings: BTreeMap<u16, TunedDegree>,
-}
+struct MusicProjector;
 
-impl SessionManifest {
-    fn action_digest(&self) -> Digest {
-        let mut encoder = Encoder::new();
-        encoder
-            .bytes(SESSION_TRANSCRIPT_DOMAIN)
-            .digest(&self.namespace)
-            .u64(self.session)
-            .u32(self.epoch)
-            .bytes(&self.actor.0)
-            .u64(self.bindings.len() as u64);
-        for (binding, degree) in &self.bindings {
-            encoder
-                .u32(u32::from(*binding))
-                .bytes(degree.tuning_id.as_bytes())
-                .u32(u32::from(degree.degree.index()));
+impl SessionProjector<MusicOp, SharedPitchSet, 2> for MusicProjector {
+    type Error = &'static str;
+
+    fn apply(
+        &self,
+        view: &mut SharedPitchSet,
+        _correlation: hhhs_session::SessionCorrelation,
+        event: &SessionEvent<MusicOp, 2>,
+    ) -> Result<(), Self::Error> {
+        match event.payload() {
+            MusicOp::AddDegree { degree } => {
+                view.pitch_classes.insert(*degree);
+            }
+            MusicOp::RemoveDegree { degree } => {
+                view.pitch_classes.remove(degree);
+            }
+            _ => return Err("compact note-set session only accepts degree add/remove"),
         }
-        encoder.digest_finish()
-    }
-
-    fn durable_command(&self, binding: u16, active: bool) -> Option<MusicOp> {
-        let degree = *self.bindings.get(&binding)?;
-        Some(if active {
-            MusicOp::AddDegree { degree }
-        } else {
-            MusicOp::RemoveDegree { degree }
-        })
+        Ok(())
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionOpenError {
-    TooManyBindings,
-    Proof,
-    ActorMismatch,
-    CapabilityDenied,
+fn degree(index: u8) -> TunedDegree {
+    TunedDegree::new(&Tuning::twelve_tet(), u16::from(index)).unwrap()
 }
 
-fn presentation_for(
-    manifest: &SessionManifest,
-    history: &DagSnapshot,
-    grant: EntryHash,
-    key: &SigningKey,
-) -> (PresentationEnvelope, PresentationContext) {
-    let context = PresentationContext::new(
-        manifest.namespace,
-        manifest.action_digest(),
-        history.frontier(),
-        notes_area(manifest.namespace),
-        Right::Invoke,
-    )
-    .unwrap();
-    let presentation = Ed25519Verifier::present(key, vec![grant], &context).unwrap();
-    (presentation, context)
-}
-
-fn accept_manifest(
-    manifest: SessionManifest,
-    presentation: &PresentationEnvelope,
-    history: &DagSnapshot,
-    capability_root: EntryHash,
-) -> Result<SessionManifest, SessionOpenError> {
-    if manifest.bindings.len() > MAX_SESSION_BINDINGS {
-        return Err(SessionOpenError::TooManyBindings);
-    }
-    let expected = PresentationContext::new(
-        manifest.namespace,
-        manifest.action_digest(),
-        history.frontier(),
-        notes_area(manifest.namespace),
-        Right::Invoke,
-    )
-    .map_err(|_| SessionOpenError::Proof)?;
-    let verified = Ed25519Verifier
-        .verify(&presentation.payload, &expected)
-        .map_err(|_| SessionOpenError::Proof)?;
-    if verified.receiver().as_bytes() != manifest.actor.0 {
-        return Err(SessionOpenError::ActorMismatch);
-    }
-    let capabilities = CapabilitySnapshot::capture_lazy(history, [capability_root]);
-    match capabilities.authorize(&verified.authorization_request(history.frontier())) {
-        AuthorizationDecision::Allowed(_) => Ok(manifest),
-        AuthorizationDecision::Denied(_) => Err(SessionOpenError::CapabilityDenied),
+fn decode_music(code: SessionEventCode, payload: Vec<u8>) -> Result<MusicOp, &'static str> {
+    let [index] = payload.as_slice() else {
+        return Err("compact degree command must contain exactly one index");
+    };
+    match code {
+        ADD_DEGREE => Ok(MusicOp::AddDegree {
+            degree: degree(*index),
+        }),
+        REMOVE_DEGREE => Ok(MusicOp::RemoveDegree {
+            degree: degree(*index),
+        }),
+        _ => Err("unknown compact music command"),
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct GateFrame {
-    session: u64,
-    epoch: u32,
-    sequence: u32,
-    binding: u16,
-    active: bool,
-    velocity: u8,
+fn receiver(key: &SigningKey) -> Receiver {
+    Receiver::new(key.verifying_key().to_bytes().to_vec()).unwrap()
 }
 
-impl GateFrame {
-    fn encode(self, key: &[u8; 32]) -> [u8; FRAME_BYTES] {
-        let mut bytes = [0_u8; FRAME_BYTES];
-        bytes[..2].copy_from_slice(&FRAME_MAGIC);
-        bytes[2] = FRAME_VERSION;
-        bytes[3..11].copy_from_slice(&self.session.to_be_bytes());
-        bytes[11..15].copy_from_slice(&self.epoch.to_be_bytes());
-        bytes[15..19].copy_from_slice(&self.sequence.to_be_bytes());
-        bytes[19..21].copy_from_slice(&self.binding.to_be_bytes());
-        bytes[21] = u8::from(self.active);
-        bytes[22] = self.velocity;
-        let tag = blake3::keyed_hash(key, &bytes[..FRAME_BODY_BYTES]);
-        bytes[FRAME_BODY_BYTES..].copy_from_slice(&tag.as_bytes()[..FRAME_TAG_BYTES]);
-        bytes
-    }
-
-    fn decode(bytes: &[u8], key: &[u8; 32]) -> Result<Self, FrameError> {
-        if bytes.len() != FRAME_BYTES || bytes[..2] != FRAME_MAGIC || bytes[2] != FRAME_VERSION {
-            return Err(FrameError::Malformed);
-        }
-        let expected = blake3::keyed_hash(key, &bytes[..FRAME_BODY_BYTES]);
-        let mut tag_difference = 0_u8;
-        for (actual, expected) in bytes[FRAME_BODY_BYTES..]
-            .iter()
-            .zip(&expected.as_bytes()[..FRAME_TAG_BYTES])
-        {
-            tag_difference |= actual ^ expected;
-        }
-        if tag_difference != 0 {
-            return Err(FrameError::Authentication);
-        }
-        let active = match bytes[21] {
-            0 => false,
-            1 => true,
-            _ => return Err(FrameError::Malformed),
-        };
-        Ok(Self {
-            session: u64::from_be_bytes(bytes[3..11].try_into().unwrap()),
-            epoch: u32::from_be_bytes(bytes[11..15].try_into().unwrap()),
-            sequence: u32::from_be_bytes(bytes[15..19].try_into().unwrap()),
-            binding: u16::from_be_bytes(bytes[19..21].try_into().unwrap()),
-            active,
-            velocity: bytes[22],
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FrameError {
-    Malformed,
-    Authentication,
-    WrongSession,
-    WrongEpoch,
-    Replay,
-    UnknownBinding,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReceiveOutcome {
-    Applied,
-    AppliedAfterGap,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DurableOutcome {
-    Confirmed,
-    Corrected,
-}
-
-struct SessionReceiver {
-    manifest: SessionManifest,
-    key: [u8; 32],
-    last_sequence: u32,
-    live: BTreeSet<TunedDegree>,
-}
-
-impl SessionReceiver {
-    fn new(manifest: SessionManifest, key: [u8; 32], durable: &MusicView) -> Self {
-        Self {
-            manifest,
-            key,
-            last_sequence: 0,
-            live: durable.live.clone(),
-        }
-    }
-
-    fn receive(&mut self, bytes: &[u8]) -> Result<ReceiveOutcome, FrameError> {
-        let frame = GateFrame::decode(bytes, &self.key)?;
-        if frame.session != self.manifest.session {
-            return Err(FrameError::WrongSession);
-        }
-        if frame.epoch != self.manifest.epoch {
-            return Err(FrameError::WrongEpoch);
-        }
-        if frame.sequence <= self.last_sequence {
-            return Err(FrameError::Replay);
-        }
-        let degree = *self
-            .manifest
-            .bindings
-            .get(&frame.binding)
-            .ok_or(FrameError::UnknownBinding)?;
-        let outcome = if frame.sequence == self.last_sequence + 1 {
-            ReceiveOutcome::Applied
-        } else {
-            ReceiveOutcome::AppliedAfterGap
-        };
-        self.last_sequence = frame.sequence;
-        if frame.active {
-            self.live.insert(degree);
-        } else {
-            self.live.remove(&degree);
-        }
-        Ok(outcome)
-    }
-
-    fn digest(&self) -> Digest {
-        degree_set_digest(&self.live)
-    }
-
-    fn reconcile_durable(&mut self, durable: &MusicView) -> DurableOutcome {
-        if self.live == durable.live {
-            DurableOutcome::Confirmed
-        } else {
-            self.live.clone_from(&durable.live);
-            DurableOutcome::Corrected
-        }
-    }
-}
-
-fn degree_set_digest(degrees: &BTreeSet<TunedDegree>) -> Digest {
-    let mut encoder = Encoder::new();
-    encoder
-        .bytes(b"tutti realtime projected degree set v1")
-        .u64(degrees.len() as u64);
-    for degree in degrees {
-        encoder
-            .bytes(degree.tuning_id.as_bytes())
-            .u32(u32::from(degree.degree.index()));
-    }
-    encoder.digest_finish()
-}
-
-fn repair_through(
+fn repair_records(
     source: &MusicReplica<MemoryStorage>,
-    target: &MusicReplica<MemoryStorage>,
     latest: EntryHash,
-) {
-    let snapshot: ReplicaRepairSnapshot = ReplicaRepairHost::new(source.clone())
-        .capture([7; 16])
+) -> Vec<(EntryHash, Vec<u8>)> {
+    ReplicaRepairHost::new(source.clone())
+        .capture([0x91; 16])
+        .unwrap()
+        .bytes_with_closure(&latest, &mut BTreeSet::new())
+}
+
+#[test]
+fn upstream_session_predicts_reifies_repairs_and_recovers_tutti_effects() {
+    let namespace = Digest::of(b"tutti upstream session qualification");
+    let owner_key = SigningKey::from_bytes(&[0x31; 32]);
+    let member_key = SigningKey::from_bytes(&[0x42; 32]);
+    let owner = ActorId::from_signing_key(&owner_key);
+    let member = ActorId::from_signing_key(&member_key);
+    let owner_receiver = receiver(&owner_key);
+    let member_receiver = receiver(&member_key);
+    let (source, root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
+    let member_grant = delegate(&source, namespace, root, &owner_key, member)
+        .unwrap()
+        .entry;
+    let base_snapshot = source.snapshot();
+    let base = base_snapshot.history.frontier();
+    let initial_view = materialize(&base_snapshot.history, &[root]).shared_pitches;
+
+    let foundation_profile = FoundationProfileId::for_domain(b"tutti ed25519 foundation v1");
+    let manifest = SessionManifest::builder()
+        .epoch(hhhs_session::SessionEpoch::new(11))
+        .namespace(namespace)
+        .base(base.clone())
+        .rules(Digest::of(b"tutti observed-remove shared pitch set v1"))
+        .vocabulary(Digest::of(b"tutti compact add/remove degree v1"))
+        .area(notes_area(namespace))
+        .allowed(AllowedMessageClasses::DURABLE_COMMAND)
+        .lease(
+            SessionLeaseTime::from_ticks(100),
+            SessionLeaseTime::from_ticks(200),
+        )
+        .max_events_per_seat(8)
+        .max_message_bytes(MAX_MESSAGE_BYTES as u32)
+        .security_profile(xchacha20poly1305_profile_id())
+        .channel_binding(Digest::of(b"tutti bounded carrier binding"))
+        .seats([
+            SessionSeat::new(owner_receiver.clone(), foundation_profile),
+            SessionSeat::new(member_receiver.clone(), foundation_profile),
+        ])
+        .build()
         .unwrap();
-    let delivered = snapshot.bytes_with_closure(&latest, &mut BTreeSet::new());
-    let mut target = ReplicaRepairHost::new(target.clone());
-    let report = block_on(target.apply(&delivered)).unwrap();
-    assert!(report.refused.is_empty());
-    assert!(report.admitted.contains(&latest));
-}
-
-fn replica_root(replica: &MusicReplica<MemoryStorage>) -> [u8; 32] {
-    entry_set_root(
-        replica
-            .snapshot()
-            .history
-            .entries_topo()
-            .into_iter()
-            .map(|entry| entry.hash()),
-    )
-}
-
-#[test]
-fn compact_fast_path_is_confirmed_or_corrected_by_durable_replica_state() {
-    let owner_key = SigningKey::from_bytes(&[1; 32]);
-    let member_key = SigningKey::from_bytes(&[2; 32]);
-    let owner = ActorId::from_signing_key(&owner_key);
-    let member = ActorId::from_signing_key(&member_key);
-    let namespace = Digest::of(b"tutti executable realtime-session probe");
-    let (owner_replica, root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
-    let (member_replica, member_root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
-    assert_eq!(root, member_root);
-
-    let grant = delegate(&owner_replica, namespace, root, &owner_key, member)
-        .unwrap()
-        .entry;
-    repair_through(&owner_replica, &member_replica, grant);
-
-    let degree = TunedDegree::new(&Tuning::twelve_tet(), 6).unwrap();
-    let manifest = SessionManifest {
-        session: 0x0102_0304_0506_0708,
-        epoch: 4,
-        namespace,
-        actor: member,
-        bindings: BTreeMap::from([(7, degree)]),
-    };
-    let (presentation, _) = presentation_for(
-        &manifest,
-        &member_replica.snapshot().history,
-        grant,
-        &member_key,
-    );
-    let accepted = accept_manifest(
-        manifest.clone(),
-        &presentation,
-        &owner_replica.snapshot().history,
-        root,
-    )
-    .unwrap();
-    let session_key = [0x5a; 32];
-    let durable_before = materialize(&owner_replica.snapshot().history, &[root]);
-    let mut receiver = SessionReceiver::new(accepted, session_key, &durable_before);
-
-    let add = GateFrame {
-        session: manifest.session,
-        epoch: manifest.epoch,
-        sequence: 1,
-        binding: 7,
-        active: true,
-        velocity: 96,
-    };
-    let encoded = add.encode(&session_key);
-    assert_eq!(
-        encoded.len(),
-        39,
-        "model frame stays far below a full record"
-    );
-    let mut tampered = encoded;
-    tampered[22] ^= 1;
-    assert_eq!(receiver.receive(&tampered), Err(FrameError::Authentication));
-    assert_eq!(receiver.receive(&encoded), Ok(ReceiveOutcome::Applied));
-    assert_eq!(receiver.receive(&encoded), Err(FrameError::Replay));
-    assert_eq!(receiver.live, BTreeSet::from([degree]));
-    assert_ne!(receiver.digest(), degree_set_digest(&durable_before.live));
-
-    let add_entry = author(
-        &member_replica,
-        namespace,
-        &member_key,
-        vec![grant],
-        manifest.durable_command(7, true).unwrap(),
-    )
-    .unwrap()
-    .entry;
-    repair_through(&member_replica, &owner_replica, add_entry);
-    let durable_add = materialize(&owner_replica.snapshot().history, &[root]);
-    assert_eq!(
-        receiver.reconcile_durable(&durable_add),
-        DurableOutcome::Confirmed
-    );
-    assert_eq!(receiver.digest(), degree_set_digest(&durable_add.live));
-
-    // The realtime removal is lost. Durable admission and ordinary HHHS repair
-    // still correct the remote projection instead of preserving a stuck note.
-    let remove_entry = author(
-        &member_replica,
-        namespace,
-        &member_key,
-        vec![grant],
-        manifest.durable_command(7, false).unwrap(),
-    )
-    .unwrap()
-    .entry;
-    repair_through(&member_replica, &owner_replica, remove_entry);
-    let durable_remove = materialize(&owner_replica.snapshot().history, &[root]);
-    assert_eq!(
-        receiver.reconcile_durable(&durable_remove),
-        DurableOutcome::Corrected
-    );
-    assert!(receiver.live.is_empty());
-    assert_eq!(replica_root(&owner_replica), replica_root(&member_replica));
-}
-
-#[test]
-fn session_proof_cannot_be_replayed_for_other_bindings_or_receiver() {
-    let owner_key = SigningKey::from_bytes(&[11; 32]);
-    let member_key = SigningKey::from_bytes(&[12; 32]);
-    let attacker_key = SigningKey::from_bytes(&[13; 32]);
-    let owner = ActorId::from_signing_key(&owner_key);
-    let member = ActorId::from_signing_key(&member_key);
-    let namespace = Digest::of(b"tutti session transcript binding probe");
-    let (replica, root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
-    let grant = delegate(&replica, namespace, root, &owner_key, member)
-        .unwrap()
-        .entry;
-    let tuning = Tuning::twelve_tet();
-    let manifest = SessionManifest {
-        session: 44,
-        epoch: 2,
-        namespace,
-        actor: member,
-        bindings: BTreeMap::from([(3, TunedDegree::new(&tuning, 3).unwrap())]),
-    };
-    let history = replica.snapshot().history;
-    let (presentation, _) = presentation_for(&manifest, &history, grant, &member_key);
-
-    let mut changed = manifest.clone();
-    changed
-        .bindings
-        .insert(4, TunedDegree::new(&tuning, 8).unwrap());
-    assert_eq!(
-        accept_manifest(changed, &presentation, &history, root),
-        Err(SessionOpenError::Proof)
-    );
-
-    let mut attacker_manifest = manifest;
-    attacker_manifest.actor = ActorId::from_signing_key(&attacker_key);
-    let (attacker_presentation, _) =
-        presentation_for(&attacker_manifest, &history, grant, &attacker_key);
-    assert_eq!(
-        accept_manifest(attacker_manifest, &attacker_presentation, &history, root),
-        Err(SessionOpenError::CapabilityDenied)
-    );
-}
-
-#[test]
-fn session_manifest_refuses_an_unbounded_binding_table() {
-    let owner_key = SigningKey::from_bytes(&[21; 32]);
-    let owner = ActorId::from_signing_key(&owner_key);
-    let namespace = Digest::of(b"bounded tutti session manifest");
-    let (replica, root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
-    let tuning = Tuning::from_scl_text(
-        "large equal division",
-        &format!(
-            "large equal division\n{}\n{}",
-            MAX_SESSION_BINDINGS + 1,
-            (1..=MAX_SESSION_BINDINGS + 1)
-                .map(|step| format!(
-                    "{:.6}\n",
-                    step as f64 * 1200.0 / (MAX_SESSION_BINDINGS + 1) as f64
-                ))
-                .collect::<String>()
-        ),
-        None,
-    )
-    .unwrap();
-    let bindings = (0..=MAX_SESSION_BINDINGS)
-        .map(|index| {
-            (
-                index as u16,
-                TunedDegree::new(&tuning, index as u16).unwrap(),
+    let policy = SessionPolicy::builder()
+        .namespace(namespace)
+        .rules(manifest.rules())
+        .vocabulary(manifest.vocabulary())
+        .area(Area::root(namespace))
+        .supported(AllowedMessageClasses::DURABLE_COMMAND)
+        .foundation_profiles([foundation_profile])
+        .security_profiles([xchacha20poly1305_profile_id()])
+        .max_seats(2)
+        .max_duration(100)
+        .max_events_per_seat(8)
+        .max_message_bytes(MAX_MESSAGE_BYTES as u32)
+        .build()
+        .unwrap();
+    let manifest_digest = manifest.digest();
+    let foundation = |seat, holder, grant| {
+        VerifiedSeatFoundation::assume_verified(
+            SeatFoundationClaim::new(
+                seat,
+                holder,
+                foundation_profile,
+                vec![grant],
+                manifest_digest,
+                base.clone(),
             )
-        })
-        .collect();
-    let manifest = SessionManifest {
-        session: 55,
-        epoch: 1,
-        namespace,
-        actor: owner,
-        bindings,
+            .unwrap(),
+        )
     };
-    let (presentation, _) =
-        presentation_for(&manifest, &replica.snapshot().history, root, &owner_key);
+    let capabilities = CapabilitySnapshot::capture(&base_snapshot.history, [root]);
+    let session = authorize_session(
+        &capabilities,
+        &policy,
+        manifest,
+        &[
+            foundation(0, owner_receiver, root),
+            foundation(1, member_receiver, member_grant),
+        ],
+    )
+    .unwrap();
+
+    let owner_binding =
+        DirectedSessionBinding::new(&session, SessionKeyEpoch::new(1), 0, 1).unwrap();
+    let member_binding =
+        DirectedSessionBinding::new(&session, SessionKeyEpoch::new(1), 1, 0).unwrap();
+    let owner_prefix = [0xa1; 16];
+    let member_prefix = [0xb2; 16];
+    let owner_secret = XChaCha20Poly1305Key::from_bytes([0x51; 32]);
+    let member_secret = XChaCha20Poly1305Key::from_bytes([0x62; 32]);
+    let mut owner_sender = SessionSenderLane::new(
+        owner_binding.clone(),
+        XChaCha20Poly1305Profile::new(XChaChaCounterNonceSource::new(owner_prefix)),
+        owner_secret.clone(),
+    )
+    .unwrap();
+    let mut owner_receiver_lane = SessionReceiverLane::<_, 2, 8>::new(
+        owner_binding.clone(),
+        XChaCha20Poly1305Profile::new(XChaChaCounterNonceSource::new(owner_prefix)),
+        owner_secret,
+    )
+    .unwrap();
+    let mut member_sender = SessionSenderLane::new(
+        member_binding.clone(),
+        XChaCha20Poly1305Profile::new(XChaChaCounterNonceSource::new(member_prefix)),
+        member_secret.clone(),
+    )
+    .unwrap();
+    let mut member_receiver_lane = SessionReceiverLane::<_, 2, 8>::new(
+        member_binding.clone(),
+        XChaCha20Poly1305Profile::new(XChaChaCounterNonceSource::new(member_prefix)),
+        member_secret,
+    )
+    .unwrap();
+
+    let add_header = owner_binding
+        .header(
+            1,
+            CausalContext::zero(),
+            EventClass::DurableCommand,
+            ADD_DEGREE,
+            SimulationTime::from_ticks(110),
+        )
+        .unwrap();
+    let remove_header = member_binding
+        .header(
+            1,
+            CausalContext::from_counters([1, 0]),
+            EventClass::DurableCommand,
+            REMOVE_DEGREE,
+            SimulationTime::from_ticks(120),
+        )
+        .unwrap();
+    let add_packet = owner_sender.seal(add_header, &[DEGREE]).unwrap();
+    let remove_packet = member_sender.seal(remove_header, &[DEGREE]).unwrap();
+    let owner_codec = XChaChaCompactPacketCodec::new(owner_prefix);
+    let member_codec = XChaChaCompactPacketCodec::new(member_prefix);
+    let add_frame = owner_codec.encode(&owner_binding, &add_packet).unwrap();
+    let remove_frame = member_codec
+        .encode(&member_binding, &remove_packet)
+        .unwrap();
+    assert!(add_frame.len() <= 64 && remove_frame.len() <= 64);
+
+    let mut tampered = add_frame.clone();
+    *tampered.last_mut().unwrap() ^= 1;
+    assert!(
+        owner_receiver_lane
+            .receive(&owner_codec.decode(&owner_binding, &tampered).unwrap())
+            .is_err()
+    );
+    let remove_received = member_receiver_lane
+        .receive(&member_codec.decode(&member_binding, &remove_frame).unwrap())
+        .unwrap();
+    assert_eq!(remove_received.disposition(), ReplayDisposition::Fresh);
+    let remove_event = remove_received.try_decode(decode_music).unwrap();
+    let remove_permitted = session
+        .permit_event(
+            SessionLeaseTime::from_ticks(120),
+            remove_event.clone(),
+            remove_frame.len(),
+        )
+        .unwrap();
+    let remove_duplicate = member_receiver_lane
+        .receive(&member_codec.decode(&member_binding, &remove_frame).unwrap())
+        .unwrap();
+    assert_eq!(remove_duplicate.disposition(), ReplayDisposition::Duplicate);
+    let remove_duplicate = remove_duplicate.try_decode(decode_music).unwrap();
+    let remove_duplicate_permitted = session
+        .permit_event(
+            SessionLeaseTime::from_ticks(120),
+            remove_duplicate,
+            remove_frame.len(),
+        )
+        .unwrap();
+    let add_received = owner_receiver_lane
+        .receive(&owner_codec.decode(&owner_binding, &add_frame).unwrap())
+        .unwrap();
+    let add_event = add_received.try_decode(decode_music).unwrap();
+    let add_permitted = session
+        .permit_event(
+            SessionLeaseTime::from_ticks(120),
+            add_event.clone(),
+            add_frame.len(),
+        )
+        .unwrap();
+
+    let mut kernel = session.kernel::<MusicOp, EVENT_CAPACITY>().unwrap();
+    let initial_cut = kernel.closed_cut(CausalContext::zero()).unwrap();
+    assert!(matches!(
+        kernel.ingest(remove_permitted).unwrap().readiness(),
+        CausalReadiness::Parked { .. }
+    ));
     assert_eq!(
-        accept_manifest(manifest, &presentation, &replica.snapshot().history, root),
-        Err(SessionOpenError::TooManyBindings)
+        kernel.gap().unwrap().first_missing(),
+        add_event.event().dot()
+    );
+    kernel.ingest(remove_duplicate_permitted).unwrap();
+    assert!(kernel.ingest(add_permitted).unwrap().readiness().advanced());
+    assert!(kernel.gap().is_none());
+
+    let mut projection =
+        SessionProjectionHost::<MusicOp, SharedPitchSet, 2, EVENT_CAPACITY, EVENT_CAPACITY>::new(
+            &session,
+            initial_cut,
+            ProjectionGeneration::new(1),
+            SimulationTime::from_ticks(120),
+            DurableProjection::new(
+                0,
+                base.clone(),
+                history_root(&base_snapshot.history),
+                initial_view.clone(),
+            ),
+        )
+        .unwrap();
+    let predicted = projection
+        .predict_between(&kernel, initial_cut, kernel.ready_cut(), &MusicProjector)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        predicted.change(),
+        SessionProjectionChange::Predicted { events: 2, .. }
+    ));
+    assert!(projection.view().is_empty());
+    assert_eq!(projection.pending_len(), 2);
+
+    let add_correlation = kernel.correlation(add_event.event().dot()).unwrap();
+    let mut effects =
+        SessionEffectLedger::<_, 2, EVENT_CAPACITY>::new(SimulationTime::from_ticks(120)).unwrap();
+    let immediate = effects
+        .predict(
+            add_correlation,
+            kernel.event(add_correlation.dot()).unwrap(),
+            &[
+                SessionEffectIntent::new(
+                    SessionEffectCode::for_domain(b"tutti preview tone"),
+                    SessionEffectKind::Reversible,
+                    "preview tone",
+                ),
+                SessionEffectIntent::new(
+                    SessionEffectCode::for_domain(b"tutti publish revision"),
+                    SessionEffectKind::Irreversible,
+                    "publish revision",
+                ),
+            ],
+        )
+        .unwrap();
+    assert_eq!(immediate.len(), 1);
+
+    let add_dot = add_event.event().dot();
+    let remove_dot = remove_event.event().dot();
+    let mut planner = session.reification_planner::<EVENT_CAPACITY>().unwrap();
+    let add_plan = planner.plan(&kernel, add_dot).unwrap();
+    let add_command = encode_command(
+        namespace,
+        owner,
+        &[root],
+        MusicOp::AddDegree {
+            degree: degree(DEGREE),
+        },
+    )
+    .unwrap();
+    let add_entry = add_plan.entry(&add_command).unwrap();
+    let add_context = source
+        .presentation_context(&add_entry, notes_area(namespace), Right::Invoke)
+        .unwrap();
+    let add_presentation = Ed25519Verifier::present(&owner_key, vec![root], &add_context).unwrap();
+    let admitted_add = source
+        .admit(AdmissionRequest::presented(
+            add_entry.clone(),
+            add_presentation,
+            notes_area(namespace),
+            Right::Invoke,
+        ))
+        .unwrap();
+    let add_session_admission = SessionAdmission::from_replica(
+        &add_entry,
+        admitted_add.durable_entry_admission(),
+        MAX_MESSAGE_BYTES,
+    )
+    .unwrap();
+    let add_admission = planner
+        .record_admission(&add_plan, &add_entry, add_session_admission)
+        .unwrap();
+    assert_eq!(add_admission.entry(), admitted_add.entry);
+    let after_add = source.snapshot();
+    let add_view = materialize(&after_add.history, &[root]).shared_pitches;
+    assert_eq!(add_view.pitch_classes, BTreeSet::from([degree(DEGREE)]));
+
+    let remove_plan = planner.plan(&kernel, remove_dot).unwrap();
+    assert!(remove_plan.predecessors().contains(&admitted_add.entry));
+    let remove_command = encode_command(
+        namespace,
+        member,
+        &[member_grant],
+        MusicOp::RemoveDegree {
+            degree: degree(DEGREE),
+        },
+    )
+    .unwrap();
+    let remove_entry = remove_plan.entry(&remove_command).unwrap();
+    let remove_context = source
+        .presentation_context(&remove_entry, notes_area(namespace), Right::Invoke)
+        .unwrap();
+    let remove_presentation =
+        Ed25519Verifier::present(&member_key, vec![member_grant], &remove_context).unwrap();
+    let admitted_remove = source
+        .admit(AdmissionRequest::presented(
+            remove_entry.clone(),
+            remove_presentation,
+            notes_area(namespace),
+            Right::Invoke,
+        ))
+        .unwrap();
+    let remove_session_admission = SessionAdmission::from_replica(
+        &remove_entry,
+        admitted_remove.durable_entry_admission(),
+        MAX_MESSAGE_BYTES,
+    )
+    .unwrap();
+    let remove_admission = planner
+        .record_admission(&remove_plan, &remove_entry, remove_session_admission)
+        .unwrap();
+    assert_eq!(remove_admission.entry(), admitted_remove.entry);
+    let after_remove = source.snapshot();
+    let remove_view = materialize(&after_remove.history, &[root]).shared_pitches;
+    assert!(remove_view.is_empty());
+
+    projection
+        .confirm(
+            add_admission,
+            DurableProjection::new(
+                1,
+                after_add.history.frontier(),
+                history_root(&after_add.history),
+                add_view,
+            ),
+            &MusicProjector,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(
+        projection.view().is_empty(),
+        "pending remove remains applied"
+    );
+    projection
+        .confirm(
+            remove_admission,
+            DurableProjection::new(
+                2,
+                after_remove.history.frontier(),
+                history_root(&after_remove.history),
+                remove_view,
+            ),
+            &MusicProjector,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(projection.pending_len(), 0);
+    assert!(projection.view().is_empty());
+
+    let records = repair_records(&source, admitted_remove.entry);
+    let (target, target_root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
+    assert_eq!(target_root, root);
+    let mut target_host = ReplicaRepairHost::new(target.clone());
+    let applied = block_on(target_host.apply(&records)).unwrap();
+    assert!(applied.refused.is_empty());
+    assert!(applied.admitted.contains(&admitted_add.entry));
+    assert!(applied.admitted.contains(&admitted_remove.entry));
+    let source_host = ReplicaRepairHost::new(source.clone());
+    let source_cut = source_host.capture([0x91; 16]).unwrap();
+    let target_cut = target_host.capture([0x91; 16]).unwrap();
+    assert_eq!(target_cut.root(), source_cut.root());
+    assert_eq!(target_cut.len(), source_cut.len());
+    assert!(
+        materialize(&target.snapshot().history, &[root])
+            .shared_pitches
+            .is_empty()
+    );
+
+    let admitted_record = |expected| {
+        records
+            .iter()
+            .find_map(|(hash, bytes)| {
+                (*hash == expected).then(|| ReplicaRecord::decode(bytes).unwrap())
+            })
+            .unwrap()
+    };
+    let repaired_add_record = admitted_record(admitted_add.entry);
+    let repaired_remove_record = admitted_record(admitted_remove.entry);
+    let repaired_add_admission = SessionAdmission::from_replica(
+        repaired_add_record.entry(),
+        target
+            .durable_entry_admission(admitted_add.entry)
+            .expect("repaired add is retained by the target Replica"),
+        MAX_MESSAGE_BYTES,
+    )
+    .unwrap();
+    let repaired_remove_admission = SessionAdmission::from_replica(
+        repaired_remove_record.entry(),
+        target
+            .durable_entry_admission(admitted_remove.entry)
+            .expect("repaired remove is retained by the target Replica"),
+        MAX_MESSAGE_BYTES,
+    )
+    .unwrap();
+    assert_eq!(repaired_add_admission, add_admission);
+    let mut repaired_planner = session.reification_planner::<EVENT_CAPACITY>().unwrap();
+    repaired_planner
+        .record_observed_admission(&kernel, repaired_add_record.entry(), repaired_add_admission)
+        .unwrap();
+    repaired_planner
+        .record_observed_admission(
+            &kernel,
+            repaired_remove_record.entry(),
+            repaired_remove_admission,
+        )
+        .unwrap();
+
+    let mut repair_projection =
+        SessionProjectionHost::<MusicOp, SharedPitchSet, 2, EVENT_CAPACITY, EVENT_CAPACITY>::new(
+            &session,
+            initial_cut,
+            ProjectionGeneration::new(1),
+            SimulationTime::from_ticks(120),
+            DurableProjection::new(0, base, history_root(&base_snapshot.history), initial_view),
+        )
+        .unwrap();
+    let mut late_kernel = session.kernel::<MusicOp, EVENT_CAPACITY>().unwrap();
+    let target_snapshot = target.snapshot();
+    let repaired_change = repair_projection
+        .resynchronize(
+            ProjectionGeneration::new(2),
+            &late_kernel,
+            SimulationTime::from_ticks(120),
+            DurableProjectionHorizon::new(
+                DurableProjection::new(
+                    2,
+                    target_snapshot.history.frontier(),
+                    history_root(&target_snapshot.history),
+                    materialize(&target_snapshot.history, &[root]).shared_pitches,
+                ),
+                &target_snapshot.history,
+                MAX_MESSAGE_BYTES,
+            ),
+            &MusicProjector,
+        )
+        .unwrap();
+    assert!(matches!(
+        repaired_change.change(),
+        SessionProjectionChange::Reset { revision: 2, .. }
+    ));
+    assert_eq!(repair_projection.confirmed_len(), 2);
+    assert_eq!(repair_projection.pending_len(), 0);
+
+    let mut recovery_lookups = 0;
+    let recovered = effects
+        .resynchronize(|correlation| {
+            recovery_lookups += 1;
+            repair_projection.confirmed_admission(correlation)
+        })
+        .unwrap();
+    assert_eq!(
+        recovery_lookups, 1,
+        "one cause decision must be reused for all sibling effects"
+    );
+    assert!(matches!(
+        recovered.iter().next(),
+        Some(SessionEffectInstruction::RunIrreversible { attempt, .. })
+            if attempt.get() == 1
+    ));
+
+    late_kernel
+        .ingest(
+            session
+                .permit_event(
+                    SessionLeaseTime::from_ticks(120),
+                    remove_event,
+                    remove_frame.len(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    late_kernel
+        .ingest(
+            session
+                .permit_event(
+                    SessionLeaseTime::from_ticks(120),
+                    add_event,
+                    add_frame.len(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(
+        repair_projection
+            .predict_between(
+                &late_kernel,
+                initial_cut,
+                late_kernel.ready_cut(),
+                &MusicProjector,
+            )
+            .unwrap()
+            .is_none(),
+        "late realtime copies of repaired admissions must be suppressed"
+    );
+    assert!(repair_projection.view().is_empty());
+
+    eprintln!(
+        "d216 session resources: frames={}/{}, kernel_slots={}B projection_slots={}B planner_slots={}B effect_slots={}B",
+        add_frame.len(),
+        remove_frame.len(),
+        kernel.retained_slot_bytes(),
+        projection.retained_slot_bytes(),
+        planner.retained_slot_bytes(),
+        effects.retained_slot_bytes(),
     );
 }

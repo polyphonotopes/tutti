@@ -18,7 +18,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::future::Future;
+use std::{collections::BTreeMap, future::Future};
 
 use hhhs_sync::FrameStream;
 use thiserror::Error;
@@ -40,10 +40,18 @@ pub const CAPABILITY_REALTIME: u32 = 1 << 0;
 pub const CAPABILITY_HHHS_REPAIR: u32 = 1 << 1;
 pub const CAPABILITY_BLE_MIDI_COEXISTENCE: u32 = 1 << 2;
 
+// Authenticated lane-profile capabilities are distinct from the boot/GATT
+// capabilities above. Keep their names separate so a transport feature cannot
+// accidentally be interpreted as an application lane.
+pub const PROFILE_CAP_MUSIC: u32 = 1 << 0;
+pub const PROFILE_CAP_HHHS_REPAIR: u32 = 1 << 1;
+pub const PROFILE_CAP_REALTIME: u32 = 1 << 2;
+pub const PROFILE_CAP_WALKIE_EXTENSION: u32 = 1 << 3;
+
 // The authenticated lane profile uses the high byte of its capability word
-// for the realtime payload generation. Keeping this inside the existing TBP1
-// profile means an old peer can still decode the profile and be refused with a
-// useful compatibility error before either side sends musical payloads.
+// for the realtime payload generation. Keeping this inside TBP2 means a peer
+// can be refused with a useful compatibility error before either side sends
+// musical payloads.
 const REALTIME_GENERATION_SHIFT: u32 = 24;
 const REALTIME_GENERATION_MASK: u32 = 0xff << REALTIME_GENERATION_SHIFT;
 
@@ -62,7 +70,15 @@ const FRAGMENT_VERSION: u8 = 1;
 const WIRE_OFFER: u8 = 1;
 const WIRE_ANSWER: u8 = 2;
 const WIRE_AUTHENTICATED: u8 = 3;
-const PROFILE_MAGIC: [u8; 4] = *b"TBP1";
+const CONTROL_MAGIC: [u8; 4] = *b"TBC1";
+const CONTROL_PROFILE: u8 = 1;
+const CONTROL_CAPABILITY_BUNDLE: u8 = 2;
+const CONTROL_REPAIR_FIN: u8 = 3;
+const CONTROL_REPAIR_ACK: u8 = 4;
+const CONTROL_CAPABILITY_READY: u8 = 5;
+// TBP3 additionally binds the canonical music vocabulary and complete Replica
+// record ceiling. These are room policy, never a per-link negotiated minimum.
+const PROFILE_MAGIC: [u8; 4] = *b"TBP3";
 const FLAG_START: u8 = 1 << 0;
 const FLAG_END: u8 = 1 << 1;
 const KNOWN_FRAGMENT_FLAGS: u8 = FLAG_START | FLAG_END;
@@ -72,11 +88,30 @@ pub const HELLO_BYTES: usize = 4 + 32 + 8 + 2 + 4;
 pub const FRAGMENT_HEADER_BYTES: usize = 2 + 1 + 1 + 2 + 2 + 2;
 pub const MIN_FRAGMENT_VALUE_BYTES: usize = FRAGMENT_HEADER_BYTES + 1;
 pub const HARD_MAX_WIRE_BYTES: usize = u16::MAX as usize;
-pub const HARD_MAX_PAYLOAD_BYTES: usize =
-    HARD_MAX_WIRE_BYTES - AUTHENTICATED_HEADER_BYTES - TAG_BYTES;
+pub const AUTHENTICATED_FRAME_OVERHEAD_BYTES: usize = AUTHENTICATED_HEADER_BYTES + TAG_BYTES;
+pub const MAX_BOOTSTRAP_WIRE_BYTES: usize = 5 + ANSWER_BYTES;
+pub const HARD_MAX_PAYLOAD_BYTES: usize = HARD_MAX_WIRE_BYTES - AUTHENTICATED_FRAME_OVERHEAD_BYTES;
 pub const DEFAULT_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 pub const SESSION_PROTOCOL_LABEL: &[u8] = b"tutti BLE bridge session v1";
-pub const PROFILE_BYTES: usize = 4 + 4 * 6;
+pub const PROFILE_BYTES: usize = 4 + 4 * 9;
+pub const CONTROL_FRAME_HEADER_BYTES: usize = 5;
+pub const CONTROL_PROFILE_BYTES: usize = CONTROL_FRAME_HEADER_BYTES + PROFILE_BYTES;
+pub const REPAIR_ATTEMPT_ID_BYTES: usize = 16;
+pub const CONTROL_REPAIR_LIFECYCLE_BYTES: usize =
+    CONTROL_FRAME_HEADER_BYTES + REPAIR_ATTEMPT_ID_BYTES + 8;
+pub const CONTROL_CAPABILITY_READY_BYTES: usize = CONTROL_FRAME_HEADER_BYTES + 32;
+
+pub const fn complete_wire_ceiling(max_payload_bytes: usize) -> Option<usize> {
+    let authenticated = match max_payload_bytes.checked_add(AUTHENTICATED_FRAME_OVERHEAD_BYTES) {
+        Some(value) => value,
+        None => return None,
+    };
+    Some(if authenticated > MAX_BOOTSTRAP_WIRE_BYTES {
+        authenticated
+    } else {
+        MAX_BOOTSTRAP_WIRE_BYTES
+    })
+}
 
 /// Exact signed-session protocol identifier shared by every Tutti BLE host.
 pub fn session_protocol_id() -> ProtocolId {
@@ -91,7 +126,10 @@ pub fn session_protocol_id() -> ProtocolId {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LaneProfile {
     pub music_generation: u32,
+    pub music_vocabulary_generation: u32,
+    pub max_replica_record_bytes: u32,
     pub hhhs_strategy_version: u32,
+    pub hhhs_repair_generation: u32,
     pub application_generation: u32,
     pub capabilities: u32,
     pub max_authenticated_payload_bytes: u32,
@@ -104,7 +142,10 @@ impl LaneProfile {
         bytes[..4].copy_from_slice(&PROFILE_MAGIC);
         for (index, value) in [
             self.music_generation,
+            self.music_vocabulary_generation,
+            self.max_replica_record_bytes,
             self.hhhs_strategy_version,
+            self.hhhs_repair_generation,
             self.application_generation,
             self.capabilities,
             self.max_authenticated_payload_bytes,
@@ -133,13 +174,18 @@ impl LaneProfile {
         };
         let profile = Self {
             music_generation: value(0),
-            hhhs_strategy_version: value(1),
-            application_generation: value(2),
-            capabilities: value(3),
-            max_authenticated_payload_bytes: value(4),
-            max_repair_frame_bytes: value(5),
+            music_vocabulary_generation: value(1),
+            max_replica_record_bytes: value(2),
+            hhhs_strategy_version: value(3),
+            hhhs_repair_generation: value(4),
+            application_generation: value(5),
+            capabilities: value(6),
+            max_authenticated_payload_bytes: value(7),
+            max_repair_frame_bytes: value(8),
         };
-        if profile.max_authenticated_payload_bytes == 0
+        if profile.music_vocabulary_generation == 0
+            || profile.max_replica_record_bytes == 0
+            || profile.max_authenticated_payload_bytes == 0
             || profile.max_authenticated_payload_bytes as usize > HARD_MAX_PAYLOAD_BYTES
             || profile.max_repair_frame_bytes == 0
             || profile.max_repair_frame_bytes as usize > HARD_MAX_WIRE_BYTES
@@ -147,6 +193,149 @@ impl LaneProfile {
             return Err(BleWireError::MalformedProfile);
         }
         Ok(profile)
+    }
+}
+
+/// Link/session-bound identifier for one BLE repair attempt.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct RepairAttemptId([u8; REPAIR_ATTEMPT_ID_BYTES]);
+
+impl RepairAttemptId {
+    pub const fn new(bytes: [u8; REPAIR_ATTEMPT_ID_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(self) -> [u8; REPAIR_ATTEMPT_ID_BYTES] {
+        self.0
+    }
+}
+
+/// Carrier close declaration sent only after the local HHHS attempt reaches a
+/// terminal outcome. The sequence names the final authenticated repair-lane
+/// message belonging to this attempt.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RepairFin {
+    pub attempt: RepairAttemptId,
+    pub last_repair_sequence: u64,
+}
+
+/// Symmetric carrier acknowledgement for the peer's authenticated FIN.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RepairAck {
+    pub attempt: RepairAttemptId,
+    pub fin_sequence: u64,
+}
+
+/// Leaf acknowledgement that the exact receiver-bound bundle was imported,
+/// every selected leaf is available, and the current device identity matches
+/// the receiver proven by the authenticated session.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CapabilityReady {
+    pub bundle_digest: [u8; 32],
+}
+
+/// Versioned authenticated control-lane message.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ControlFrame<'a> {
+    Profile(LaneProfile),
+    CapabilityBundle(&'a [u8]),
+    RepairFin(RepairFin),
+    RepairAck(RepairAck),
+    CapabilityReady(CapabilityReady),
+}
+
+fn encode_control_body(kind: u8, body: &[u8]) -> Result<Vec<u8>, BleWireError> {
+    let total = CONTROL_FRAME_HEADER_BYTES.checked_add(body.len()).ok_or(
+        BleWireError::PayloadTooLarge {
+            actual: usize::MAX,
+            maximum: HARD_MAX_PAYLOAD_BYTES,
+        },
+    )?;
+    if total > HARD_MAX_PAYLOAD_BYTES {
+        return Err(BleWireError::PayloadTooLarge {
+            actual: total,
+            maximum: HARD_MAX_PAYLOAD_BYTES,
+        });
+    }
+    let mut bytes = Vec::with_capacity(total);
+    bytes.extend_from_slice(&CONTROL_MAGIC);
+    bytes.push(kind);
+    bytes.extend_from_slice(body);
+    Ok(bytes)
+}
+
+pub fn encode_control_profile(profile: LaneProfile) -> Vec<u8> {
+    encode_control_body(CONTROL_PROFILE, &profile.encode())
+        .expect("the fixed control profile fits the hard payload ceiling")
+}
+
+pub fn encode_control_capability_bundle(bundle: &[u8]) -> Result<Vec<u8>, BleWireError> {
+    encode_control_body(CONTROL_CAPABILITY_BUNDLE, bundle)
+}
+
+pub fn encode_control_repair_fin(fin: RepairFin) -> Vec<u8> {
+    let mut body = [0; REPAIR_ATTEMPT_ID_BYTES + 8];
+    body[..REPAIR_ATTEMPT_ID_BYTES].copy_from_slice(&fin.attempt.as_bytes());
+    body[REPAIR_ATTEMPT_ID_BYTES..].copy_from_slice(&fin.last_repair_sequence.to_be_bytes());
+    encode_control_body(CONTROL_REPAIR_FIN, &body)
+        .expect("the fixed repair FIN fits the hard payload ceiling")
+}
+
+pub fn encode_control_repair_ack(ack: RepairAck) -> Vec<u8> {
+    let mut body = [0; REPAIR_ATTEMPT_ID_BYTES + 8];
+    body[..REPAIR_ATTEMPT_ID_BYTES].copy_from_slice(&ack.attempt.as_bytes());
+    body[REPAIR_ATTEMPT_ID_BYTES..].copy_from_slice(&ack.fin_sequence.to_be_bytes());
+    encode_control_body(CONTROL_REPAIR_ACK, &body)
+        .expect("the fixed repair ACK fits the hard payload ceiling")
+}
+
+pub fn encode_control_capability_ready(ready: CapabilityReady) -> Vec<u8> {
+    encode_control_body(CONTROL_CAPABILITY_READY, &ready.bundle_digest)
+        .expect("the fixed capability-ready acknowledgement fits the hard payload ceiling")
+}
+
+pub fn decode_control_frame(bytes: &[u8]) -> Result<ControlFrame<'_>, BleWireError> {
+    if bytes.len() < CONTROL_FRAME_HEADER_BYTES || bytes[..4] != CONTROL_MAGIC {
+        return Err(BleWireError::MalformedControlFrame);
+    }
+    let body = &bytes[CONTROL_FRAME_HEADER_BYTES..];
+    match bytes[4] {
+        CONTROL_PROFILE => Ok(ControlFrame::Profile(LaneProfile::decode(body)?)),
+        CONTROL_CAPABILITY_BUNDLE => Ok(ControlFrame::CapabilityBundle(body)),
+        CONTROL_REPAIR_FIN | CONTROL_REPAIR_ACK => {
+            let expected = REPAIR_ATTEMPT_ID_BYTES + 8;
+            if body.len() != expected {
+                return Err(BleWireError::MalformedControlFrame);
+            }
+            let mut attempt = [0; REPAIR_ATTEMPT_ID_BYTES];
+            attempt.copy_from_slice(&body[..REPAIR_ATTEMPT_ID_BYTES]);
+            let sequence = u64::from_be_bytes(
+                body[REPAIR_ATTEMPT_ID_BYTES..]
+                    .try_into()
+                    .expect("validated repair lifecycle control layout"),
+            );
+            let attempt = RepairAttemptId::new(attempt);
+            if bytes[4] == CONTROL_REPAIR_FIN {
+                Ok(ControlFrame::RepairFin(RepairFin {
+                    attempt,
+                    last_repair_sequence: sequence,
+                }))
+            } else {
+                Ok(ControlFrame::RepairAck(RepairAck {
+                    attempt,
+                    fin_sequence: sequence,
+                }))
+            }
+        }
+        CONTROL_CAPABILITY_READY => {
+            let bundle_digest = body
+                .try_into()
+                .map_err(|_| BleWireError::MalformedControlFrame)?;
+            Ok(ControlFrame::CapabilityReady(CapabilityReady {
+                bundle_digest,
+            }))
+        }
+        kind => Err(BleWireError::UnknownControlFrame(kind)),
     }
 }
 
@@ -572,6 +761,86 @@ impl<'a> Iterator for Fragmenter<'a> {
     }
 }
 
+/// Owned, incremental fragmentation cursor.
+///
+/// Queue owners retain one bounded authenticated wire message and materialize
+/// at most one GATT value at a time. This avoids duplicating a 1.5 KiB repair
+/// frame into a hundred tiny queue allocations and permits a scheduler to
+/// interleave higher-priority message fragments explicitly.
+pub struct FragmentCursor {
+    message_id: u16,
+    bytes: Vec<u8>,
+    value_bytes: usize,
+    offset: usize,
+    emitted_empty: bool,
+}
+
+impl FragmentCursor {
+    pub fn new(message_id: u16, bytes: Vec<u8>, value_bytes: usize) -> Result<Self, BleWireError> {
+        Fragmenter::new(message_id, &bytes, value_bytes)?;
+        Ok(Self {
+            message_id,
+            bytes,
+            value_bytes,
+            offset: 0,
+            emitted_empty: false,
+        })
+    }
+
+    pub fn retained_wire_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub const fn fragment_value_bytes(&self) -> usize {
+        self.value_bytes
+    }
+
+    pub fn is_complete(&self) -> bool {
+        (self.bytes.is_empty() && self.emitted_empty)
+            || (!self.bytes.is_empty() && self.offset == self.bytes.len())
+    }
+
+    pub fn encode_next(&mut self, output: &mut [u8]) -> Result<Option<usize>, BleWireError> {
+        let total_bytes =
+            u16::try_from(self.bytes.len()).map_err(|_| BleWireError::WireMessageTooLarge {
+                actual: self.bytes.len(),
+                maximum: HARD_MAX_WIRE_BYTES,
+            })?;
+        if self.bytes.is_empty() {
+            if self.emitted_empty {
+                return Ok(None);
+            }
+            let used = Fragment {
+                message_id: self.message_id,
+                total_bytes,
+                offset: 0,
+                start: true,
+                end: true,
+                payload: &[],
+            }
+            .encode_into(output)?;
+            self.emitted_empty = true;
+            return Ok(Some(used));
+        }
+        if self.offset == self.bytes.len() {
+            return Ok(None);
+        }
+        let start = self.offset;
+        let end = (start + self.value_bytes - FRAGMENT_HEADER_BYTES).min(self.bytes.len());
+        let used = Fragment {
+            message_id: self.message_id,
+            total_bytes,
+            offset: u16::try_from(start).map_err(|_| BleWireError::MalformedFragment)?,
+            start: start == 0,
+            end: end == self.bytes.len(),
+            payload: &self.bytes[start..end],
+        }
+        .encode_into(output)?;
+        self.offset = end;
+        Ok(Some(used))
+    }
+}
+
 struct PartialMessage {
     message_id: u16,
     total_bytes: u16,
@@ -579,30 +848,110 @@ struct PartialMessage {
     bytes: Vec<u8>,
 }
 
-/// One-message-at-a-time bounded reassembler. GATT preserves value order on a
-/// connection; a host should use one instance per direction and reset it when
-/// the connection closes.
+/// Bounded reassembler for a small number of interleaved logical messages.
+///
+/// Both the message count and total declared assembly bytes are capped before
+/// allocation. A host should use one instance per direction and reset it when
+/// the authenticated connection closes.
 pub struct Reassembler {
+    budget: ReassemblyBudget,
+    retained_partial_bytes: usize,
+    partials: BTreeMap<u16, PartialMessage>,
+}
+
+pub const MAX_INTERLEAVED_REASSEMBLIES: u8 = 8;
+
+/// Allocation and concurrency limits for one BLE receive direction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ReassemblyBudget {
     max_wire_bytes: usize,
-    partial: Option<PartialMessage>,
+    max_partial_messages: u8,
+    max_total_partial_bytes: usize,
+}
+
+impl ReassemblyBudget {
+    pub fn new(
+        max_wire_bytes: usize,
+        max_partial_messages: u8,
+        max_total_partial_bytes: usize,
+    ) -> Result<Self, BleWireError> {
+        if max_wire_bytes == 0
+            || max_wire_bytes > HARD_MAX_WIRE_BYTES
+            || max_partial_messages == 0
+            || max_partial_messages > MAX_INTERLEAVED_REASSEMBLIES
+            || max_total_partial_bytes == 0
+        {
+            return Err(BleWireError::InvalidReassemblyBudget);
+        }
+        Ok(Self {
+            max_wire_bytes,
+            max_partial_messages,
+            max_total_partial_bytes,
+        })
+    }
+
+    pub fn single(max_wire_bytes: usize) -> Result<Self, BleWireError> {
+        Self::new(max_wire_bytes, 1, max_wire_bytes)
+    }
+
+    pub const fn max_wire_bytes(self) -> usize {
+        self.max_wire_bytes
+    }
+
+    pub const fn max_partial_messages(self) -> u8 {
+        self.max_partial_messages
+    }
+
+    pub const fn max_total_partial_bytes(self) -> usize {
+        self.max_total_partial_bytes
+    }
 }
 
 impl Reassembler {
     pub fn new(max_wire_bytes: usize) -> Result<Self, BleWireError> {
-        if max_wire_bytes > HARD_MAX_WIRE_BYTES {
-            return Err(BleWireError::WireMessageTooLarge {
-                actual: max_wire_bytes,
-                maximum: HARD_MAX_WIRE_BYTES,
-            });
-        }
+        Self::with_budget(ReassemblyBudget::single(max_wire_bytes)?)
+    }
+
+    /// Create a reassembler that permits a bounded number of fragmented
+    /// logical messages to make progress concurrently. A lane-aware sender can
+    /// therefore yield between repair fragments for control or realtime while
+    /// total retained assembly memory remains explicit.
+    pub fn with_budget(budget: ReassemblyBudget) -> Result<Self, BleWireError> {
         Ok(Self {
-            max_wire_bytes,
-            partial: None,
+            budget,
+            retained_partial_bytes: 0,
+            partials: BTreeMap::new(),
         })
     }
 
     pub fn reset(&mut self) {
-        self.partial = None;
+        self.partials.clear();
+        self.retained_partial_bytes = 0;
+    }
+
+    pub const fn retained_partial_bytes(&self) -> usize {
+        self.retained_partial_bytes
+    }
+
+    pub const fn budget(&self) -> ReassemblyBudget {
+        self.budget
+    }
+
+    pub fn restrict_budget(&mut self, budget: ReassemblyBudget) -> Result<(), BleWireError> {
+        if budget.max_wire_bytes > self.budget.max_wire_bytes
+            || budget.max_partial_messages > self.budget.max_partial_messages
+            || budget.max_total_partial_bytes > self.budget.max_total_partial_bytes
+            || self.partials.len() > usize::from(budget.max_partial_messages)
+            || self.retained_partial_bytes > budget.max_total_partial_bytes
+            || self
+                .partials
+                .values()
+                .any(|partial| usize::from(partial.total_bytes) > budget.max_wire_bytes)
+        {
+            return Err(BleWireError::InvalidReassemblyBudget);
+        }
+        self.budget = budget;
+        Ok(())
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Result<Option<Vec<u8>>, BleWireError> {
@@ -616,30 +965,48 @@ impl Reassembler {
     fn push_inner(&mut self, bytes: &[u8]) -> Result<Option<Vec<u8>>, BleWireError> {
         let fragment = decode_fragment(bytes)?;
         let total = usize::from(fragment.total_bytes);
-        if total > self.max_wire_bytes {
+        if total > self.budget.max_wire_bytes {
             return Err(BleWireError::WireMessageTooLarge {
                 actual: total,
-                maximum: self.max_wire_bytes,
+                maximum: self.budget.max_wire_bytes,
             });
         }
         if fragment.start {
-            if self.partial.is_some() {
+            if self.partials.contains_key(&fragment.message_id)
+                || self.partials.len() == usize::from(self.budget.max_partial_messages)
+            {
                 return Err(BleWireError::InterleavedMessages);
+            }
+            let retained = self.retained_partial_bytes.checked_add(total).ok_or(
+                BleWireError::PartialAssemblyBudgetExceeded {
+                    requested: usize::MAX,
+                    maximum: self.budget.max_total_partial_bytes,
+                },
+            )?;
+            if retained > self.budget.max_total_partial_bytes {
+                return Err(BleWireError::PartialAssemblyBudgetExceeded {
+                    requested: retained,
+                    maximum: self.budget.max_total_partial_bytes,
+                });
             }
             let mut assembled = Vec::new();
             assembled
                 .try_reserve_exact(total)
                 .map_err(|_| BleWireError::AllocationFailed(total))?;
-            self.partial = Some(PartialMessage {
-                message_id: fragment.message_id,
-                total_bytes: fragment.total_bytes,
-                next_offset: 0,
-                bytes: assembled,
-            });
+            self.partials.insert(
+                fragment.message_id,
+                PartialMessage {
+                    message_id: fragment.message_id,
+                    total_bytes: fragment.total_bytes,
+                    next_offset: 0,
+                    bytes: assembled,
+                },
+            );
+            self.retained_partial_bytes = retained;
         }
         let partial = self
-            .partial
-            .as_mut()
+            .partials
+            .get_mut(&fragment.message_id)
             .ok_or(BleWireError::MissingFragmentStart)?;
         if partial.message_id != fragment.message_id
             || partial.total_bytes != fragment.total_bytes
@@ -659,9 +1026,12 @@ impl Reassembler {
             return Ok(None);
         }
         let complete = self
-            .partial
-            .take()
+            .partials
+            .remove(&fragment.message_id)
             .ok_or(BleWireError::MissingFragmentStart)?;
+        self.retained_partial_bytes = self
+            .retained_partial_bytes
+            .saturating_sub(usize::from(complete.total_bytes));
         if complete.bytes.len() != total {
             return Err(BleWireError::FragmentDiscontinuity);
         }
@@ -681,7 +1051,10 @@ pub trait RepairFrameIo {
         &mut self,
     ) -> impl Future<Output = Result<Option<Vec<u8>>, Self::Error>>;
 
-    fn close(self) -> impl Future<Output = ()>;
+    /// Complete the carrier's explicit repair close handshake. Returning
+    /// success means the peer confirmed the terminal boundary; EOF alone is
+    /// never repair success.
+    fn close(self) -> impl Future<Output = Result<(), Self::Error>>;
 }
 
 /// Adapt an application-demultiplexed BLE repair lane to HHHS's carrier seam.
@@ -718,8 +1091,8 @@ impl<I: RepairFrameIo> FrameStream for BleRepairStream<I> {
         self.io.receive_repair_frame().await
     }
 
-    async fn close(self) {
-        self.io.close().await;
+    async fn close(self) -> Result<(), Self::Error> {
+        self.io.close().await
     }
 }
 
@@ -733,6 +1106,10 @@ pub enum BleWireError {
     MalformedAuthenticatedFrame,
     #[error("malformed Tutti BLE control profile")]
     MalformedProfile,
+    #[error("malformed authenticated Tutti BLE control frame")]
+    MalformedControlFrame,
+    #[error("unknown authenticated Tutti BLE control frame {0}")]
+    UnknownControlFrame(u8),
     #[error("malformed Tutti BLE fragment")]
     MalformedFragment,
     #[error("fragment value is {actual} bytes; minimum is {minimum}")]
@@ -743,8 +1120,12 @@ pub enum BleWireError {
     WireMessageTooLarge { actual: usize, maximum: usize },
     #[error("payload is {actual} bytes; maximum is {maximum}")]
     PayloadTooLarge { actual: usize, maximum: usize },
+    #[error("invalid BLE reassembly budget")]
+    InvalidReassemblyBudget,
     #[error("fragment stream started another message before finishing the current one")]
     InterleavedMessages,
+    #[error("partial BLE assemblies retain {requested} declared bytes; maximum is {maximum}")]
+    PartialAssemblyBudgetExceeded { requested: usize, maximum: usize },
     #[error("fragment arrived without a start fragment")]
     MissingFragmentStart,
     #[error("fragment id, size, or offset is discontinuous")]
@@ -853,20 +1234,101 @@ mod tests {
         assert_eq!(capabilities & 0x00ff_ffff, 3);
         let profile = LaneProfile {
             music_generation: 7,
+            music_vocabulary_generation: 1,
+            max_replica_record_bytes: 1456,
             hhhs_strategy_version: 1,
+            hhhs_repair_generation: 2,
             application_generation: 5,
             capabilities,
             max_authenticated_payload_bytes: 4_096,
             max_repair_frame_bytes: 60 * 1_024,
         };
         let bytes = profile.encode();
-        assert_eq!(&bytes[..4], b"TBP1");
+        assert_eq!(&bytes[..4], b"TBP3");
         assert_eq!(LaneProfile::decode(&bytes).unwrap(), profile);
+        let mut legacy = bytes;
+        legacy[..4].copy_from_slice(b"TBP1");
+        assert!(matches!(
+            LaneProfile::decode(&legacy),
+            Err(BleWireError::MalformedProfile)
+        ));
         let mut invalid = bytes;
-        invalid[20..24].fill(0);
+        invalid[32..36].fill(0);
         assert!(matches!(
             LaneProfile::decode(&invalid),
             Err(BleWireError::MalformedProfile)
+        ));
+    }
+
+    #[test]
+    fn authenticated_control_vocabulary_is_tagged_and_versioned() {
+        let profile = LaneProfile {
+            music_generation: 8,
+            music_vocabulary_generation: 1,
+            max_replica_record_bytes: 1456,
+            hhhs_strategy_version: 1,
+            hhhs_repair_generation: 2,
+            application_generation: 5,
+            capabilities: with_realtime_generation(PROFILE_CAP_MUSIC, 3),
+            max_authenticated_payload_bytes: 1541,
+            max_repair_frame_bytes: 1536,
+        };
+        let encoded_profile = encode_control_profile(profile);
+        assert_eq!(encoded_profile.len(), CONTROL_PROFILE_BYTES);
+        assert_eq!(&encoded_profile[..5], b"TBC1\x01");
+        assert_eq!(
+            decode_control_frame(&encoded_profile).unwrap(),
+            ControlFrame::Profile(profile)
+        );
+        assert!(matches!(
+            decode_control_frame(&profile.encode()),
+            Err(BleWireError::MalformedControlFrame)
+        ));
+
+        let bundle = vec![0x42; 1118];
+        let encoded_bundle = encode_control_capability_bundle(&bundle).unwrap();
+        assert_eq!(&encoded_bundle[..5], b"TBC1\x02");
+        assert_eq!(
+            decode_control_frame(&encoded_bundle).unwrap(),
+            ControlFrame::CapabilityBundle(&bundle)
+        );
+
+        let attempt = RepairAttemptId::new([0xa5; REPAIR_ATTEMPT_ID_BYTES]);
+        let fin = RepairFin {
+            attempt,
+            last_repair_sequence: 41,
+        };
+        let ack = RepairAck {
+            attempt,
+            fin_sequence: 42,
+        };
+        let encoded_fin = encode_control_repair_fin(fin);
+        let encoded_ack = encode_control_repair_ack(ack);
+        assert_eq!(encoded_fin.len(), CONTROL_REPAIR_LIFECYCLE_BYTES);
+        assert_eq!(encoded_ack.len(), CONTROL_REPAIR_LIFECYCLE_BYTES);
+        assert_eq!(
+            decode_control_frame(&encoded_fin).unwrap(),
+            ControlFrame::RepairFin(fin)
+        );
+        assert_eq!(
+            decode_control_frame(&encoded_ack).unwrap(),
+            ControlFrame::RepairAck(ack)
+        );
+        let ready = CapabilityReady {
+            bundle_digest: [0x5a; 32],
+        };
+        let encoded_ready = encode_control_capability_ready(ready);
+        assert_eq!(encoded_ready.len(), CONTROL_CAPABILITY_READY_BYTES);
+        assert_eq!(
+            decode_control_frame(&encoded_ready).unwrap(),
+            ControlFrame::CapabilityReady(ready)
+        );
+
+        let mut unknown = encoded_profile;
+        unknown[4] = 0xff;
+        assert!(matches!(
+            decode_control_frame(&unknown),
+            Err(BleWireError::UnknownControlFrame(0xff))
         ));
     }
 
@@ -947,6 +1409,111 @@ mod tests {
         fragmented_round_trip(185, &payload);
         fragmented_round_trip(512, &payload);
         fragmented_round_trip(20, &[]);
+    }
+
+    #[test]
+    fn incremental_fragmentation_interleaves_two_bounded_messages() {
+        let repair = vec![0x52; 1_536];
+        let realtime = vec![0x4d; 52];
+        let mut repair_cursor = FragmentCursor::new(70, repair.clone(), 20).unwrap();
+        let mut realtime_cursor = FragmentCursor::new(71, realtime.clone(), 20).unwrap();
+        assert_eq!(repair_cursor.retained_wire_bytes(), repair.len());
+        assert_eq!(realtime_cursor.retained_wire_bytes(), realtime.len());
+        let mut receiver =
+            Reassembler::with_budget(ReassemblyBudget::new(1_536, 2, 1_536 * 2).unwrap()).unwrap();
+        let mut packet = [0_u8; 20];
+        let mut completed = BTreeMap::new();
+
+        while !repair_cursor.is_complete() || !realtime_cursor.is_complete() {
+            for (id, cursor) in [(70_u16, &mut repair_cursor), (71_u16, &mut realtime_cursor)] {
+                if let Some(used) = cursor.encode_next(&mut packet).unwrap()
+                    && let Some(message) = receiver.push(&packet[..used]).unwrap()
+                {
+                    completed.insert(id, message);
+                }
+            }
+        }
+
+        assert_eq!(completed.remove(&70), Some(repair));
+        assert_eq!(completed.remove(&71), Some(realtime));
+    }
+
+    fn encoded_test_fragment(
+        message_id: u16,
+        total_bytes: u16,
+        offset: u16,
+        start: bool,
+        end: bool,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut packet =
+            vec![0; MIN_FRAGMENT_VALUE_BYTES.max(FRAGMENT_HEADER_BYTES + payload.len())];
+        let used = Fragment {
+            message_id,
+            total_bytes,
+            offset,
+            start,
+            end,
+            payload,
+        }
+        .encode_into(&mut packet)
+        .unwrap();
+        packet.truncate(used);
+        packet
+    }
+
+    #[test]
+    fn partial_assembly_budget_refuses_declared_byte_dos_and_recovers() {
+        let mut receiver =
+            Reassembler::with_budget(ReassemblyBudget::new(1_536, 3, 1_600).unwrap()).unwrap();
+        let first = encoded_test_fragment(80, 1_536, 0, true, false, &[1; 8]);
+        assert!(receiver.push(&first).unwrap().is_none());
+        assert_eq!(receiver.retained_partial_bytes(), 1_536);
+
+        let over_budget = encoded_test_fragment(81, 100, 0, true, false, &[2; 8]);
+        assert!(matches!(
+            receiver.push(&over_budget),
+            Err(BleWireError::PartialAssemblyBudgetExceeded {
+                requested: 1_636,
+                maximum: 1_600,
+            })
+        ));
+        assert_eq!(receiver.retained_partial_bytes(), 0);
+
+        let complete = encoded_test_fragment(82, 3, 0, true, true, b"new");
+        assert_eq!(
+            receiver.push(&complete).unwrap().as_deref(),
+            Some(&b"new"[..])
+        );
+    }
+
+    #[test]
+    fn duplicate_start_or_discontinuity_resets_all_partial_messages() {
+        let mut receiver =
+            Reassembler::with_budget(ReassemblyBudget::new(64, 2, 128).unwrap()).unwrap();
+        let a_start = encoded_test_fragment(90, 20, 0, true, false, b"aaaa");
+        assert!(receiver.push(&a_start).unwrap().is_none());
+        assert!(matches!(
+            receiver.push(&a_start),
+            Err(BleWireError::InterleavedMessages)
+        ));
+        assert_eq!(receiver.retained_partial_bytes(), 0);
+
+        assert!(receiver.push(&a_start).unwrap().is_none());
+        let b_start = encoded_test_fragment(91, 10, 0, true, false, b"bb");
+        assert!(receiver.push(&b_start).unwrap().is_none());
+        let discontinuous = encoded_test_fragment(90, 20, 5, false, false, b"c");
+        assert!(matches!(
+            receiver.push(&discontinuous),
+            Err(BleWireError::FragmentDiscontinuity)
+        ));
+        assert_eq!(receiver.retained_partial_bytes(), 0);
+
+        let complete = encoded_test_fragment(92, 2, 0, true, true, b"ok");
+        assert_eq!(
+            receiver.push(&complete).unwrap().as_deref(),
+            Some(&b"ok"[..])
+        );
     }
 
     #[test]
@@ -1033,8 +1600,9 @@ mod tests {
             Ok(self.receive.pop_front())
         }
 
-        async fn close(mut self) {
+        async fn close(mut self) -> Result<(), Self::Error> {
             self.closed = true;
+            Ok(())
         }
     }
 

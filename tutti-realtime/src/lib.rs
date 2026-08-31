@@ -15,7 +15,7 @@ const MIDI_MAGIC: [u8; 4] = *b"TMI1";
 /// This advances whenever an existing realtime payload changes incompatibly.
 /// Carriers must negotiate it before sending realtime frames; the four-byte
 /// per-frame magics remain useful corruption/type guards, not negotiation.
-pub const WIRE_GENERATION: u8 = 3;
+pub const WIRE_GENERATION: u8 = 4;
 pub const MIDI_FRAME_BYTES: usize = 4 + 1 + 4 + 1 + 1 + 2;
 pub const MAX_FRAME_BYTES: usize = if MIDI_FRAME_BYTES > tutti_roundtable::MAX_FRAME_BYTES {
     MIDI_FRAME_BYTES

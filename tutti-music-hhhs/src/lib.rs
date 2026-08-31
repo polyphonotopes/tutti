@@ -21,24 +21,90 @@ use hhhs_cap::{
 };
 use hhhs_proof::{MAX_PRESENTED_GRANTS, SigningKey};
 use hhhs_replica::{
-    AdmissionOutcome, AdmissionPolicy, AdmissionRequest, AdmittedAuthority, Replica, ReplicaError,
+    AdmissionOutcome, AdmissionPolicy, AdmissionRequest, AdmittedAuthority, CapabilityBundle,
+    CapabilityBundleError, CapabilityExportError, CapabilityImportError, CapabilityImportReport,
+    Replica, ReplicaError,
 };
+use hhhs_session::ReifiedSessionCommand;
 use hhhs_store::{
     Materializer, ProjectionCheckpoint, ProjectionInput, ProjectionKey, ProjectionUpdate,
     ReplicaStorage,
 };
+use hhhs_sync::SessionBudget;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tutti_music::{
     Envelope, MusicOp, RoundTableConfig, SharedPitchSet, TunedDegree, TunedPeriodicPitch,
-    TuningDefinition,
+    TuningDefinition, roundtable::RoundTablePattern,
 };
 
 pub const PROTOCOL_GENERATION: u32 = 8;
+/// Deterministic application vocabulary used by rooms that must remain
+/// repairable by the bounded Tutti Leaf carrier.
+pub const EMBEDDED_VOCABULARY_GENERATION: u32 = 1;
+/// Maximum complete HHHS repair frame supported by the current embedded BLE
+/// profile. This is not negotiated into a per-peer admission limit.
+pub const EMBEDDED_REPAIR_FRAME_BYTES: usize = 1536;
+/// Maximum complete receiver-bound provisioning bundle accepted by the
+/// embedded room profile. The host checks [`CapabilityBundle::encoded_len`]
+/// before allocating its wire representation and the Leaf checks the received
+/// byte length before decoding.
+pub const EMBEDDED_CAPABILITY_BUNDLE_BYTES: usize = EMBEDDED_REPAIR_FRAME_BYTES;
 const PROJECTION_SCHEMA: u32 = 6;
-pub const REPAIR_ALPN: &[u8] = b"tutti/music/hhhs-replica/8";
+/// Outer carrier discriminator for music schema 8 over HHHS repair wire 2.
+///
+/// This must change whenever either generation changes; peers refuse the ALPN
+/// before attempting to decode an incompatible `SyncMessage`.
+pub const REPAIR_ALPN: &[u8] = b"tutti/music/hhhs-replica/8/repair-2/vocabulary-1";
 pub const STRATEGY_VERSION: u32 = 1;
 pub const STRATEGY_NAME: &str = "tutti-music-hhhs-entry";
+
+fn round_table_settings(mut config: RoundTableConfig) -> RoundTableConfig {
+    config.pattern = RoundTablePattern::default().cleared();
+    config
+}
+
+/// Admission vocabulary bound by a room profile before any music edit.
+///
+/// Transport negotiation may choose a smaller frame size and consequently
+/// refuse to carry the room, but it must never mutate this canonical admission
+/// ceiling for one peer. Every replica expected to converge uses the same
+/// value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MusicVocabularyProfile {
+    pub generation: u32,
+    pub max_replica_record_bytes: usize,
+}
+
+impl MusicVocabularyProfile {
+    pub fn embedded_compatible() -> Self {
+        let budget = SessionBudget {
+            max_frame_bytes: EMBEDDED_REPAIR_FRAME_BYTES,
+            ..SessionBudget::default()
+        };
+        Self {
+            generation: EMBEDDED_VOCABULARY_GENERATION,
+            max_replica_record_bytes: budget.max_entry_record_bytes(),
+        }
+    }
+}
+
+/// Failure at the bounded capability-provisioning boundary.
+#[derive(Debug, Error)]
+pub enum EmbeddedProvisioningError {
+    #[error("capability bundle is {actual} bytes; embedded profile permits {maximum}")]
+    BundleTooLarge { maximum: usize, actual: usize },
+    #[error("failed to export receiver-bound capability bundle: {0}")]
+    Export(#[from] CapabilityExportError),
+    #[error("failed to decode receiver-bound capability bundle: {0}")]
+    Bundle(#[from] CapabilityBundleError),
+    #[error("failed to import receiver-bound capability bundle: {0}")]
+    Import(#[from] CapabilityImportError),
+    #[error("selected capability leaf {0:?} is not yet available")]
+    SelectedLeafUnavailable(EntryHash),
+    #[error("the embedded receiver cannot exercise its selected capability: {0}")]
+    Possession(#[from] ReplicaError),
+}
 
 pub const COMMAND_DOMAIN: &[u8] = b"tutti music command v8\0";
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
@@ -161,6 +227,21 @@ pub fn decode_command(bytes: &[u8]) -> Result<CommandEnvelope, CommandCodecError
         return Err(CommandCodecError::NonCanonical);
     }
     Ok(envelope)
+}
+
+/// Decode the payload of an entry presented to the music Replica.
+///
+/// Reification is an HHHS session correlation envelope around the exact
+/// canonical Tutti command bytes.  It does not create a second music wire
+/// format and it does not bypass the ordinary music authority checks below.
+fn decode_admitted_command(bytes: &[u8]) -> Result<CommandEnvelope, String> {
+    if ReifiedSessionCommand::has_domain(bytes) {
+        let reified = ReifiedSessionCommand::decode(bytes, MAX_COMMAND_BYTES)
+            .map_err(|error| format!("invalid reified session command: {error}"))?;
+        decode_command(reified.command()).map_err(|error| error.to_string())
+    } else {
+        decode_command(bytes).map_err(|error| error.to_string())
+    }
 }
 
 pub fn notes_area(namespace: Digest) -> Area {
@@ -326,7 +407,7 @@ impl AdmissionPolicy for MusicAdmissionPolicy {
         if let Ok(capability) = decode_capability(&entry.payload) {
             return self.validate_capability(&capability, entry, history, authority);
         }
-        let envelope = decode_command(&entry.payload).map_err(|error| error.to_string())?;
+        let envelope = decode_admitted_command(&entry.payload)?;
         if envelope.namespace != *self.namespace.as_bytes() {
             return Err("command namespace does not match this Replica".into());
         }
@@ -365,6 +446,17 @@ pub fn initialize<S: ReplicaStorage + 'static>(
     owner: ActorId,
     storage: S,
 ) -> Result<(MusicReplica<S>, EntryHash), ReplicaError> {
+    initialize_with_vocabulary(namespace, owner, storage, None)
+}
+
+/// Build a capability-authorized music Replica under one room-wide admission
+/// vocabulary. The same profile must be selected by every replica in the room.
+pub fn initialize_with_vocabulary<S: ReplicaStorage + 'static>(
+    namespace: Digest,
+    owner: ActorId,
+    storage: S,
+    vocabulary: Option<MusicVocabularyProfile>,
+) -> Result<(MusicReplica<S>, EntryHash), ReplicaError> {
     let root = hhhs_cap::entry(
         &CapabilityOp::Grant(Grant {
             issuer: owner.receiver(),
@@ -376,17 +468,157 @@ pub fn initialize<S: ReplicaStorage + 'static>(
         Position::empty(),
     );
     let root_id = root.hash();
-    let replica = Replica::builder(
+    let mut builder = Replica::builder(
         storage,
         MusicAdmissionPolicy::capabilities(namespace),
         namespace,
     )
-    .ed25519_capabilities([root_id])?
-    .build()?;
+    .ed25519_capabilities([root_id])?;
+    if let Some(vocabulary) = vocabulary {
+        builder = builder.max_replica_record_bytes(vocabulary.max_replica_record_bytes);
+    }
+    let replica = builder.build()?;
     if !replica.snapshot().history.contains(&root_id) {
         replica.admit(AdmissionRequest::trusted_root(root))?;
     }
     Ok((replica, root_id))
+}
+
+/// Build the receiving side of a capability-authorized music room.
+///
+/// Unlike [`initialize_with_vocabulary`], this does not mint or admit another
+/// root. The trusted roots name the room that will be populated by an imported
+/// receiver-bound [`CapabilityBundle`]. The receiver still needs its own
+/// signing key to exercise a selected leaf.
+///
+/// The caller must obtain these roots from a provisioning peer already
+/// authenticated and bound to the current carrier session/boot. A bundle's
+/// self-description alone is never a reason to trust its roots.
+pub fn initialize_delegated_with_vocabulary<S: ReplicaStorage + 'static>(
+    namespace: Digest,
+    trusted_roots: impl IntoIterator<Item = EntryHash>,
+    storage: S,
+    vocabulary: MusicVocabularyProfile,
+) -> Result<MusicReplica<S>, ReplicaError> {
+    Replica::builder(
+        storage,
+        MusicAdmissionPolicy::capabilities(namespace),
+        namespace,
+    )
+    .ed25519_capabilities(trusted_roots)?
+    .max_replica_record_bytes(vocabulary.max_replica_record_bytes)
+    .build()
+}
+
+fn preflight_embedded_capability_bundle(
+    bundle: &CapabilityBundle,
+) -> Result<(), EmbeddedProvisioningError> {
+    let actual = bundle.encoded_len();
+    if actual > EMBEDDED_CAPABILITY_BUNDLE_BYTES {
+        return Err(EmbeddedProvisioningError::BundleTooLarge {
+            maximum: EMBEDDED_CAPABILITY_BUNDLE_BYTES,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+/// Export a minimal public root/delegation closure for one embedded receiver.
+///
+/// The returned object contains no possession secret. Call
+/// [`encode_embedded_capability_bundle`] to preserve the allocation-free size
+/// preflight before producing carrier bytes.
+pub fn export_embedded_capability_bundle<S: ReplicaStorage + 'static>(
+    replica: &MusicReplica<S>,
+    expected_receiver: ActorId,
+    selected_leaves: impl IntoIterator<Item = EntryHash>,
+) -> Result<CapabilityBundle, EmbeddedProvisioningError> {
+    let bundle = replica.export_capability_bundle(expected_receiver.receiver(), selected_leaves)?;
+    preflight_embedded_capability_bundle(&bundle)?;
+    Ok(bundle)
+}
+
+/// Encode a preflighted bundle for the embedded authenticated control lane.
+pub fn encode_embedded_capability_bundle(
+    bundle: &CapabilityBundle,
+) -> Result<Vec<u8>, EmbeddedProvisioningError> {
+    preflight_embedded_capability_bundle(bundle)?;
+    let bytes = bundle.encode();
+    debug_assert_eq!(bytes.len(), bundle.encoded_len());
+    Ok(bytes)
+}
+
+/// Decode a bundle only after enforcing the much smaller embedded profile,
+/// rather than the generic HHHS bundle maximum.
+pub fn decode_embedded_capability_bundle(
+    bytes: &[u8],
+) -> Result<CapabilityBundle, EmbeddedProvisioningError> {
+    if bytes.len() > EMBEDDED_CAPABILITY_BUNDLE_BYTES {
+        return Err(EmbeddedProvisioningError::BundleTooLarge {
+            maximum: EMBEDDED_CAPABILITY_BUNDLE_BYTES,
+            actual: bytes.len(),
+        });
+    }
+    Ok(CapabilityBundle::decode(bytes)?)
+}
+
+/// Import a bounded public capability closure for the exact Leaf receiver.
+/// Readiness must additionally require `available_leaves` to contain every
+/// selected leaf and the current device to prove possession of that receiver's
+/// signing key; a deferred partial import is not authority. This function does
+/// not authenticate the provisioning peer or install roots from an untrusted
+/// bundle.
+pub fn import_embedded_capability_bundle<S: ReplicaStorage + 'static>(
+    replica: &MusicReplica<S>,
+    bundle: &CapabilityBundle,
+    expected_receiver: ActorId,
+) -> Result<CapabilityImportReport, EmbeddedProvisioningError> {
+    preflight_embedded_capability_bundle(bundle)?;
+    let report = replica.import_capability_bundle(bundle, &expected_receiver.receiver())?;
+    for leaf in bundle.selected_leaves() {
+        if !report.available_leaves.contains(leaf) {
+            return Err(EmbeddedProvisioningError::SelectedLeafUnavailable(*leaf));
+        }
+    }
+    Ok(report)
+}
+
+/// Prove that the local signing key can exercise the bundle's selected leaf.
+///
+/// This prepares, but deliberately does not commit, a valid bounded command.
+/// It therefore checks receiver-key possession, presentation availability,
+/// policy, and the room-wide record-size fence without changing history or a
+/// materialized view. A provisioning endpoint must complete this check before
+/// announcing readiness.
+pub fn prove_embedded_capability_possession<S: ReplicaStorage + 'static>(
+    replica: &MusicReplica<S>,
+    bundle: &CapabilityBundle,
+    key: &SigningKey,
+) -> Result<(), EmbeddedProvisioningError> {
+    let actor = ActorId::from_signing_key(key);
+    if bundle.expected_receiver() != &actor.receiver() {
+        return Err(EmbeddedProvisioningError::Import(
+            CapabilityImportError::ReceiverMismatch,
+        ));
+    }
+    let command = MusicOp::SetRoundTable {
+        config: RoundTableConfig::default(),
+    };
+    let payload = encode_command(
+        bundle.namespace(),
+        actor,
+        bundle.selected_leaves(),
+        command.clone(),
+    )
+    .map_err(|error| ReplicaError::ApplicationRejected(error.to_string()))?;
+    let _prepared = replica.prepare_ed25519(
+        payload,
+        command_area(bundle.namespace(), &command),
+        Right::Invoke,
+        bundle.selected_leaves().to_vec(),
+        key,
+    )?;
+    Ok(())
 }
 
 /// Build a music Replica whose trust boundary is an authenticated session.
@@ -398,13 +630,26 @@ pub fn initialize_open<S: ReplicaStorage + 'static>(
     namespace: Digest,
     storage: S,
 ) -> Result<MusicReplica<S>, ReplicaError> {
-    Replica::builder(
+    initialize_open_with_vocabulary(namespace, storage, None)
+}
+
+/// Build an authenticated-channel music Replica under one room-wide
+/// admission vocabulary.
+pub fn initialize_open_with_vocabulary<S: ReplicaStorage + 'static>(
+    namespace: Digest,
+    storage: S,
+    vocabulary: Option<MusicVocabularyProfile>,
+) -> Result<MusicReplica<S>, ReplicaError> {
+    let mut builder = Replica::builder(
         storage,
         MusicAdmissionPolicy::open_session(namespace),
         namespace,
     )
-    .open()
-    .build()
+    .open();
+    if let Some(vocabulary) = vocabulary {
+        builder = builder.max_replica_record_bytes(vocabulary.max_replica_record_bytes);
+    }
+    builder.build()
 }
 
 pub fn author<S: ReplicaStorage + 'static>(
@@ -477,7 +722,7 @@ pub fn commands(history: &DagSnapshot, roots: &[EntryHash]) -> Vec<(EntryHash, A
         .into_iter()
         .filter_map(|entry| {
             let id = entry.hash();
-            let envelope = decode_command(&entry.payload).ok()?;
+            let envelope = decode_admitted_command(&entry.payload).ok()?;
             currently_authorized(&capabilities, history, id, &envelope).then_some((
                 id,
                 envelope.actor,
@@ -500,7 +745,7 @@ pub fn open_commands(
         .into_iter()
         .filter_map(|entry| {
             let id = entry.hash();
-            let envelope = decode_command(&entry.payload).ok()?;
+            let envelope = decode_admitted_command(&entry.payload).ok()?;
             valid_open_command(namespace, &envelope).then_some((
                 id,
                 envelope.actor,
@@ -639,7 +884,12 @@ impl FoldState {
                     );
                 }
                 MusicOp::SetRoundTable { config } => {
-                    advance_maxima(&reach, &mut self.round_table_maxima, *id, *config);
+                    advance_maxima(
+                        &reach,
+                        &mut self.round_table_maxima,
+                        *id,
+                        round_table_settings(*config),
+                    );
                 }
                 MusicOp::SetTuning { .. }
                 | MusicOp::SetEnvelope { .. }
@@ -866,7 +1116,7 @@ impl Materializer for MusicMaterializer {
             if capabilities.is_some() && decode_capability(&entry.payload).is_ok() {
                 return self.project(input.history, None);
             }
-            let Ok(envelope) = decode_command(&entry.payload) else {
+            let Ok(envelope) = decode_admitted_command(&entry.payload) else {
                 return self.project(input.history, None);
             };
             if matches!(envelope.command, MusicOp::SetTuning { .. }) {
@@ -935,6 +1185,13 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn repair_alpn_names_the_exact_hhhs_wire_generation() {
+        assert_eq!(hhhs_sync::REPAIR_WIRE_GENERATION, 2);
+        assert!(REPAIR_ALPN.windows(9).any(|window| window == b"/repair-2"));
+        assert!(REPAIR_ALPN.ends_with(b"/vocabulary-1"));
+    }
+
     fn resolve_reference<T>(reach: &ReachIndex, values: Vec<(EntryHash, T)>) -> Option<T> {
         let ids: Vec<_> = values.iter().map(|(id, _)| *id).collect();
         let winner = ids
@@ -969,7 +1226,7 @@ mod tests {
             commands
                 .iter()
                 .filter_map(|(id, _, command)| match command {
-                    MusicOp::SetRoundTable { config } => Some((*id, *config)),
+                    MusicOp::SetRoundTable { config } => Some((*id, round_table_settings(*config))),
                     _ => None,
                 })
                 .collect(),
@@ -1121,6 +1378,348 @@ mod tests {
             hhhs_store::materialize(&projection, &replica.snapshot().history, None).unwrap();
         assert!(MusicView::try_from(&removed).unwrap().live.is_empty());
         assert_eq!(removed.bytes(), rebuilt.bytes());
+    }
+
+    fn oversized_valid_tuning() -> TuningDefinition {
+        let built_in = TuningDefinition::twelve_tet();
+        TuningDefinition::new(
+            format!("! {}\n{}", "embedded-boundary".repeat(128), built_in.scl),
+            None,
+        )
+        .expect("comments preserve a valid Scala tuning")
+    }
+
+    #[test]
+    fn embedded_vocabulary_refuses_desktop_and_leaf_oversize_records() {
+        let vocabulary = MusicVocabularyProfile::embedded_compatible();
+        assert_eq!(vocabulary.max_replica_record_bytes, 1456);
+        let namespace = Digest::of(b"embedded-compatible vocabulary refusal");
+        let key = SigningKey::from_bytes(&[0x61; 32]);
+        let owner = ActorId::from_signing_key(&key);
+
+        let (desktop, root) =
+            initialize_with_vocabulary(namespace, owner, MemoryStorage::new(), Some(vocabulary))
+                .expect("the capability root fits the embedded vocabulary");
+        assert_eq!(
+            desktop.max_replica_record_bytes(),
+            vocabulary.max_replica_record_bytes
+        );
+        let desktop_before = desktop.snapshot();
+        let desktop_frontier_before = desktop_before.history.frontier().clone();
+        let desktop_root_before = hhhs_store::history_root(&desktop_before.history);
+        let desktop_view_before = materialize(&desktop_before.history, &[root]);
+        let desktop_error = author(
+            &desktop,
+            namespace,
+            &key,
+            vec![root],
+            MusicOp::SetTuning {
+                definition: oversized_valid_tuning(),
+            },
+        )
+        .expect_err("desktop must not admit a record the leaf cannot repair");
+        assert!(matches!(
+            desktop_error,
+            ReplicaError::ReplicaRecordLimitExceeded {
+                maximum: 1456,
+                actual
+            } if actual > 1456
+        ));
+        let desktop_after = desktop.snapshot();
+        assert_eq!(desktop_after.history.len(), desktop_before.history.len());
+        assert_eq!(desktop_after.history.frontier(), desktop_frontier_before);
+        assert_eq!(
+            hhhs_store::history_root(&desktop_after.history),
+            desktop_root_before
+        );
+        assert_eq!(
+            materialize(&desktop_after.history, &[root]),
+            desktop_view_before
+        );
+
+        let leaf_namespace = Digest::of(b"embedded-compatible delegated leaf refusal");
+        let leaf_owner_key = SigningKey::from_bytes(&[0x63; 32]);
+        let leaf_owner = ActorId::from_signing_key(&leaf_owner_key);
+        let leaf_key = SigningKey::from_bytes(&[0x64; 32]);
+        let leaf_actor = ActorId::from_signing_key(&leaf_key);
+        let (leaf, leaf_root) = initialize_with_vocabulary(
+            leaf_namespace,
+            leaf_owner,
+            MemoryStorage::new(),
+            Some(vocabulary),
+        )
+        .unwrap();
+        let leaf_grant = delegate(
+            &leaf,
+            leaf_namespace,
+            leaf_root,
+            &leaf_owner_key,
+            leaf_actor,
+        )
+        .expect("delegation itself fits the embedded vocabulary")
+        .entry;
+        let leaf_before = leaf.snapshot();
+        let leaf_frontier_before = leaf_before.history.frontier().clone();
+        let leaf_root_before = hhhs_store::history_root(&leaf_before.history);
+        let leaf_view_before = materialize(&leaf_before.history, &[leaf_root]);
+        let leaf_error = author(
+            &leaf,
+            leaf_namespace,
+            &leaf_key,
+            vec![leaf_grant],
+            MusicOp::SetTuning {
+                definition: oversized_valid_tuning(),
+            },
+        )
+        .expect_err("leaf-local admission uses the same vocabulary fence");
+        assert!(matches!(
+            leaf_error,
+            ReplicaError::ReplicaRecordLimitExceeded {
+                maximum: 1456,
+                actual
+            } if actual > 1456
+        ));
+        let leaf_after = leaf.snapshot();
+        assert_eq!(leaf_after.history.len(), leaf_before.history.len());
+        assert_eq!(leaf_after.history.frontier(), leaf_frontier_before);
+        assert_eq!(
+            hhhs_store::history_root(&leaf_after.history),
+            leaf_root_before
+        );
+        assert_eq!(
+            materialize(&leaf_after.history, &[leaf_root]),
+            leaf_view_before
+        );
+    }
+
+    #[test]
+    fn embedded_vocabulary_accepts_ordinary_capability_music_records() {
+        let vocabulary = MusicVocabularyProfile::embedded_compatible();
+        let namespace = Digest::of(b"embedded-compatible ordinary vocabulary");
+        let key = SigningKey::from_bytes(&[0x62; 32]);
+        let actor = ActorId::from_signing_key(&key);
+        let (replica, root) =
+            initialize_with_vocabulary(namespace, actor, MemoryStorage::new(), Some(vocabulary))
+                .unwrap();
+        author(
+            &replica,
+            namespace,
+            &key,
+            vec![root],
+            MusicOp::SetTuning {
+                definition: TuningDefinition::twelve_tet(),
+            },
+        )
+        .unwrap();
+        let degree = TunedDegree::new(&Tuning::twelve_tet(), 4).unwrap();
+        for command in [
+            MusicOp::AddDegree { degree },
+            MusicOp::RemoveDegree { degree },
+            MusicOp::SetRoundTable {
+                config: RoundTableConfig::default(),
+            },
+        ] {
+            author(&replica, namespace, &key, vec![root], command).unwrap();
+        }
+        assert_eq!(
+            replica.max_replica_record_bytes(),
+            vocabulary.max_replica_record_bytes
+        );
+    }
+
+    #[test]
+    fn embedded_bundle_provisions_exact_receiver_and_own_key_converges_add_remove() {
+        let vocabulary = MusicVocabularyProfile::embedded_compatible();
+        let namespace = Digest::of(b"embedded receiver-bound music provisioning");
+        let owner_key = SigningKey::from_bytes(&[0x71; 32]);
+        let owner = ActorId::from_signing_key(&owner_key);
+        let leaf_key = SigningKey::from_bytes(&[0x72; 32]);
+        let leaf = ActorId::from_signing_key(&leaf_key);
+        let wrong_key = SigningKey::from_bytes(&[0x73; 32]);
+        let wrong = ActorId::from_signing_key(&wrong_key);
+
+        let (desktop, root) =
+            initialize_with_vocabulary(namespace, owner, MemoryStorage::new(), Some(vocabulary))
+                .unwrap();
+        let selected = delegate(&desktop, namespace, root, &owner_key, leaf)
+            .expect("one-hop Leaf delegation fits the embedded vocabulary")
+            .entry;
+
+        let bundle = export_embedded_capability_bundle(&desktop, leaf, [selected]).unwrap();
+        assert_eq!(bundle.expected_receiver(), &leaf.receiver());
+        assert_eq!(bundle.trusted_roots(), &[root]);
+        assert_eq!(bundle.selected_leaves(), &[selected]);
+        assert_eq!(bundle.encoded_len(), 1118);
+        assert!(bundle.encoded_len() <= EMBEDDED_CAPABILITY_BUNDLE_BYTES);
+        let encoded = encode_embedded_capability_bundle(&bundle).unwrap();
+        assert_eq!(encoded.len(), bundle.encoded_len());
+        let received = decode_embedded_capability_bundle(&encoded).unwrap();
+        assert_eq!(received, bundle);
+
+        let wrong_receiver_replica = initialize_delegated_with_vocabulary(
+            namespace,
+            [root],
+            MemoryStorage::new(),
+            vocabulary,
+        )
+        .unwrap();
+        assert!(matches!(
+            import_embedded_capability_bundle(&wrong_receiver_replica, &received, wrong),
+            Err(EmbeddedProvisioningError::Import(
+                CapabilityImportError::ReceiverMismatch
+            ))
+        ));
+
+        let unrelated_root = EntryHash(Digest::of(b"unrelated embedded room root"));
+        let wrong_root_replica = initialize_delegated_with_vocabulary(
+            namespace,
+            [unrelated_root],
+            MemoryStorage::new(),
+            vocabulary,
+        )
+        .unwrap();
+        assert!(matches!(
+            import_embedded_capability_bundle(&wrong_root_replica, &received, leaf),
+            Err(EmbeddedProvisioningError::Import(
+                CapabilityImportError::UntrustedRoot(found)
+            )) if found == root
+        ));
+
+        let leaf_replica = initialize_delegated_with_vocabulary(
+            namespace,
+            received.trusted_roots().iter().copied(),
+            MemoryStorage::new(),
+            vocabulary,
+        )
+        .unwrap();
+        let import = import_embedded_capability_bundle(&leaf_replica, &received, leaf).unwrap();
+        assert_eq!(import.available_leaves, vec![selected]);
+        assert!(import.deferred.is_empty());
+        assert!(import.rejected.is_empty());
+        let before_proof = leaf_replica.snapshot();
+        prove_embedded_capability_possession(&leaf_replica, &received, &leaf_key).unwrap();
+        let after_proof = leaf_replica.snapshot();
+        assert_eq!(
+            after_proof.history.frontier(),
+            before_proof.history.frontier()
+        );
+        assert_eq!(
+            hhhs_store::history_root(&after_proof.history),
+            hhhs_store::history_root(&before_proof.history),
+            "the readiness possession probe must not admit its command"
+        );
+        assert!(
+            prove_embedded_capability_possession(&leaf_replica, &received, &wrong_key).is_err()
+        );
+        assert_eq!(
+            hhhs_store::history_root(&leaf_replica.snapshot().history),
+            hhhs_store::history_root(&desktop.snapshot().history)
+        );
+
+        let degree = TunedDegree::new(&Tuning::twelve_tet(), 7).unwrap();
+        assert!(
+            author(
+                &leaf_replica,
+                namespace,
+                &wrong_key,
+                vec![selected],
+                MusicOp::AddDegree { degree },
+            )
+            .is_err(),
+            "the public bundle is not possession authority for another key"
+        );
+        assert!(
+            author_open(
+                &leaf_replica,
+                namespace,
+                leaf,
+                MusicOp::AddDegree { degree },
+            )
+            .is_err(),
+            "a provisioned Leaf must not fall back to open authority"
+        );
+
+        for command in [
+            MusicOp::AddDegree { degree },
+            MusicOp::RemoveDegree { degree },
+        ] {
+            let payload = encode_command(namespace, leaf, &[selected], command.clone()).unwrap();
+            let prepared = leaf_replica
+                .prepare_ed25519(
+                    payload,
+                    command_area(namespace, &command),
+                    Right::Invoke,
+                    vec![selected],
+                    &leaf_key,
+                )
+                .expect("the Leaf's own key exercises the imported delegation");
+            let record = prepared.replica_record();
+            leaf_replica.commit_prepared(prepared).unwrap();
+            desktop.admit(record.into_admission_request()).unwrap();
+
+            let leaf_history = leaf_replica.snapshot().history;
+            let desktop_history = desktop.snapshot().history;
+            assert_eq!(
+                hhhs_store::history_root(&leaf_history),
+                hhhs_store::history_root(&desktop_history)
+            );
+            assert_eq!(
+                materialize(&leaf_history, &[root]),
+                materialize(&desktop_history, &[root])
+            );
+        }
+        assert!(
+            materialize(&desktop.snapshot().history, &[root])
+                .live
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn embedded_bundle_refuses_deeper_closure_above_control_budget() {
+        let vocabulary = MusicVocabularyProfile::embedded_compatible();
+        let namespace = Digest::of(b"embedded provisioning depth refusal");
+        let owner_key = SigningKey::from_bytes(&[0x74; 32]);
+        let owner = ActorId::from_signing_key(&owner_key);
+        let intermediary_key = SigningKey::from_bytes(&[0x75; 32]);
+        let intermediary = ActorId::from_signing_key(&intermediary_key);
+        let leaf_key = SigningKey::from_bytes(&[0x76; 32]);
+        let leaf = ActorId::from_signing_key(&leaf_key);
+        let (desktop, root) =
+            initialize_with_vocabulary(namespace, owner, MemoryStorage::new(), Some(vocabulary))
+                .unwrap();
+        let intermediary_grant = delegate(&desktop, namespace, root, &owner_key, intermediary)
+            .unwrap()
+            .entry;
+        let leaf_grant = delegate(
+            &desktop,
+            namespace,
+            intermediary_grant,
+            &intermediary_key,
+            leaf,
+        )
+        .unwrap()
+        .entry;
+
+        let generic = desktop
+            .export_capability_bundle(leaf.receiver(), [leaf_grant])
+            .unwrap();
+        assert!(generic.encoded_len() > EMBEDDED_CAPABILITY_BUNDLE_BYTES);
+        let actual = generic.encoded_len();
+        assert!(matches!(
+            export_embedded_capability_bundle(&desktop, leaf, [leaf_grant]),
+            Err(EmbeddedProvisioningError::BundleTooLarge {
+                maximum: EMBEDDED_CAPABILITY_BUNDLE_BYTES,
+                actual: found,
+            }) if found == actual
+        ));
+        assert!(matches!(
+            decode_embedded_capability_bundle(&vec![0; EMBEDDED_CAPABILITY_BUNDLE_BYTES + 1]),
+            Err(EmbeddedProvisioningError::BundleTooLarge {
+                maximum: EMBEDDED_CAPABILITY_BUNDLE_BYTES,
+                actual,
+            }) if actual == EMBEDDED_CAPABILITY_BUNDLE_BYTES + 1
+        ));
     }
 
     #[test]
