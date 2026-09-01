@@ -18,11 +18,11 @@ path = "src/main.rs"
 
 [dependencies]
 futures = "0.3"
-hhhs = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "5ea8cb9e971a5de4882b00242c37258207cf1762" }
-hhhs-proof = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "5ea8cb9e971a5de4882b00242c37258207cf1762" }
-hhhs-replica = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "5ea8cb9e971a5de4882b00242c37258207cf1762" }
-hhhs-store = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "5ea8cb9e971a5de4882b00242c37258207cf1762" }
-hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "5ea8cb9e971a5de4882b00242c37258207cf1762" }
+hhhs = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "03e67df07d8046d4796f858411f99220f65cc0ea" }
+hhhs-proof = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "03e67df07d8046d4796f858411f99220f65cc0ea" }
+hhhs-replica = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "03e67df07d8046d4796f858411f99220f65cc0ea" }
+hhhs-store = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "03e67df07d8046d4796f858411f99220f65cc0ea" }
+hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "03e67df07d8046d4796f858411f99220f65cc0ea" }
 # The render protocol and its capability-native HHHS Replica seam. AMY owns no
 # alternate source log, materializer, or network runtime.
 tutti-music = { path = "../tutti-music" }
