@@ -4,8 +4,9 @@ Tutti contains reusable music state and host adapters. The current development
 line adds the embedded session, BLE, shared pitch-set, round-table, realtime,
 and AMY wire boundaries used by Tutti Leaf and Walkie Songie. Its HHHS 0.4 protocol
 layer is `tutti-music-hhhs`; discovery and carriers remain application
-concerns. The workspace uses the immutable HHHS `v0.4.4` tag throughout. Its
-HHHS materializer keeps only live causal maxima with `WalkingReach` instead of
+concerns. The workspace resolves every HHHS crate from one exact reviewed Git
+revision recorded in the manifests and lockfiles. The HHHS materializer keeps
+only live causal maxima with `WalkingReach` instead of
 constructing an eager transitive closure.
 
 ## Crates

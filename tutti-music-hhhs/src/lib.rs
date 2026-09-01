@@ -23,7 +23,7 @@ use hhhs_proof::{MAX_PRESENTED_GRANTS, SigningKey};
 use hhhs_replica::{
     AdmissionOutcome, AdmissionPolicy, AdmissionRequest, AdmittedAuthority, CapabilityBundle,
     CapabilityBundleError, CapabilityExportError, CapabilityImportError, CapabilityImportReport,
-    Replica, ReplicaError,
+    PreparedAdmission, Replica, ReplicaError, ReplicaPreparation,
 };
 use hhhs_session::ReifiedSessionCommand;
 use hhhs_store::{
@@ -605,6 +605,16 @@ pub fn prove_embedded_capability_possession<S: ReplicaStorage + 'static>(
     bundle: &CapabilityBundle,
     key: &SigningKey,
 ) -> Result<(), EmbeddedProvisioningError> {
+    prove_embedded_capability_possession_with(replica.preparation(), bundle, key)
+}
+
+/// Prove embedded receiver possession through a checked, nonpublishing
+/// Replica surface owned by an external durable host.
+pub fn prove_embedded_capability_possession_with<S: ReplicaStorage + 'static>(
+    replica: ReplicaPreparation<'_, S, MusicAdmissionPolicy>,
+    bundle: &CapabilityBundle,
+    key: &SigningKey,
+) -> Result<(), EmbeddedProvisioningError> {
     let actor = ActorId::from_signing_key(key);
     if bundle.expected_receiver() != &actor.receiver() {
         return Err(EmbeddedProvisioningError::Import(
@@ -678,6 +688,45 @@ pub fn author<S: ReplicaStorage + 'static>(
     )
     .map_err(|error| ReplicaError::ApplicationRejected(error.to_string()))?;
     replica.author_ed25519(payload, area, Right::Invoke, presented, key)
+}
+
+/// Prepare a capability-authorized music command for an external durable
+/// owner without publishing it to the Replica.
+///
+/// Embedded and browser placements must pass the result to their single
+/// [`hhhs_replica::DurableReplicaHost`] rather than calling [`author`] when
+/// canonical visibility is required to follow an asynchronous durable write.
+pub fn prepare_author<S: ReplicaStorage + 'static>(
+    replica: &MusicReplica<S>,
+    namespace: Digest,
+    key: &SigningKey,
+    presented: Vec<EntryHash>,
+    command: MusicOp,
+) -> Result<PreparedAdmission, ReplicaError> {
+    prepare_author_with(replica.preparation(), namespace, key, presented, command)
+}
+
+/// Prepare through a recovery-checked, nonpublishing Replica surface.
+///
+/// This is the preferred seam for [`hhhs_replica::DurableReplicaHost`]
+/// consumers: the caller obtains [`ReplicaPreparation`] from the checked host
+/// and cannot accidentally publish around its external durability boundary.
+pub fn prepare_author_with<S: ReplicaStorage + 'static>(
+    replica: ReplicaPreparation<'_, S, MusicAdmissionPolicy>,
+    namespace: Digest,
+    key: &SigningKey,
+    presented: Vec<EntryHash>,
+    command: MusicOp,
+) -> Result<PreparedAdmission, ReplicaError> {
+    let area = command_area(namespace, &command);
+    let payload = encode_command(
+        namespace,
+        ActorId::from_signing_key(key),
+        &presented,
+        command,
+    )
+    .map_err(|error| ReplicaError::ApplicationRejected(error.to_string()))?;
+    replica.prepare_ed25519(payload, area, Right::Invoke, presented, key)
 }
 
 /// Author through HHHS open authority after the caller's session boundary has
@@ -1356,6 +1405,41 @@ mod tests {
             MusicOp::AddDegree { degree },
         )
         .unwrap();
+        assert_eq!(
+            materialize(&replica.snapshot().history, &[root]).live,
+            [degree].into()
+        );
+    }
+
+    #[test]
+    fn durable_host_preparation_is_nonpublishing_until_exact_commit() {
+        let key = SigningKey::from_bytes(&[0x19; 32]);
+        let owner = ActorId::from_signing_key(&key);
+        let namespace = Digest::of(b"durable host music preparation");
+        let (replica, root) = initialize(namespace, owner, MemoryStorage::new()).unwrap();
+        let degree = TunedDegree::new(&Tuning::twelve_tet(), 9).unwrap();
+        let before = replica.snapshot();
+
+        let prepared = prepare_author_with(
+            replica.preparation(),
+            namespace,
+            &key,
+            vec![root],
+            MusicOp::AddDegree { degree },
+        )
+        .unwrap();
+        let prepared_entry = prepared.entry();
+        let after_prepare = replica.snapshot();
+        assert_eq!(after_prepare.history.len(), before.history.len());
+        assert_eq!(after_prepare.history.frontier(), before.history.frontier());
+        assert_eq!(
+            hhhs_store::history_root(&after_prepare.history),
+            hhhs_store::history_root(&before.history)
+        );
+        assert!(!before.history.contains(&prepared_entry));
+
+        let admitted = replica.commit_prepared(prepared).unwrap();
+        assert_eq!(admitted.entry, prepared_entry);
         assert_eq!(
             materialize(&replica.snapshot().history, &[root]).live,
             [degree].into()
