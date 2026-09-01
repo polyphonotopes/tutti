@@ -324,7 +324,7 @@ dependencies = [
 [[package]]
 name = "hhhs"
 version = "0.4.5"
-source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=833f7029925a9867b96325e5c6d0ada9346415e6#833f7029925a9867b96325e5c6d0ada9346415e6"
+source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=6a3a96ee88e570ce3004edd88672e63434986050#6a3a96ee88e570ce3004edd88672e63434986050"
 dependencies = [
  "hhhs-dag",
 ]
@@ -332,7 +332,7 @@ dependencies = [
 [[package]]
 name = "hhhs-cap"
 version = "0.4.5"
-source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=833f7029925a9867b96325e5c6d0ada9346415e6#833f7029925a9867b96325e5c6d0ada9346415e6"
+source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=6a3a96ee88e570ce3004edd88672e63434986050#6a3a96ee88e570ce3004edd88672e63434986050"
 dependencies = [
  "hhhs",
 ]
@@ -340,7 +340,7 @@ dependencies = [
 [[package]]
 name = "hhhs-dag"
 version = "0.4.5"
-source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=833f7029925a9867b96325e5c6d0ada9346415e6#833f7029925a9867b96325e5c6d0ada9346415e6"
+source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=6a3a96ee88e570ce3004edd88672e63434986050#6a3a96ee88e570ce3004edd88672e63434986050"
 dependencies = [
  "blake3",
  "serde",
@@ -349,7 +349,7 @@ dependencies = [
 [[package]]
 name = "hhhs-proof"
 version = "0.4.5"
-source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=833f7029925a9867b96325e5c6d0ada9346415e6#833f7029925a9867b96325e5c6d0ada9346415e6"
+source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=6a3a96ee88e570ce3004edd88672e63434986050#6a3a96ee88e570ce3004edd88672e63434986050"
 dependencies = [
  "ed25519-dalek",
  "hhhs",
@@ -359,7 +359,7 @@ dependencies = [
 [[package]]
 name = "hhhs-replica"
 version = "0.4.5"
-source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=833f7029925a9867b96325e5c6d0ada9346415e6#833f7029925a9867b96325e5c6d0ada9346415e6"
+source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=6a3a96ee88e570ce3004edd88672e63434986050#6a3a96ee88e570ce3004edd88672e63434986050"
 dependencies = [
  "hhhs",
  "hhhs-cap",
@@ -371,7 +371,7 @@ dependencies = [
 [[package]]
 name = "hhhs-session"
 version = "0.4.5"
-source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=833f7029925a9867b96325e5c6d0ada9346415e6#833f7029925a9867b96325e5c6d0ada9346415e6"
+source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=6a3a96ee88e570ce3004edd88672e63434986050#6a3a96ee88e570ce3004edd88672e63434986050"
 dependencies = [
  "blake3",
  "hhhs",
@@ -381,7 +381,7 @@ dependencies = [
 [[package]]
 name = "hhhs-store"
 version = "0.4.5"
-source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=833f7029925a9867b96325e5c6d0ada9346415e6#833f7029925a9867b96325e5c6d0ada9346415e6"
+source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=6a3a96ee88e570ce3004edd88672e63434986050#6a3a96ee88e570ce3004edd88672e63434986050"
 dependencies = [
  "blake3",
  "hhhs",
@@ -390,7 +390,7 @@ dependencies = [
 [[package]]
 name = "hhhs-sync"
 version = "0.4.5"
-source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=833f7029925a9867b96325e5c6d0ada9346415e6#833f7029925a9867b96325e5c6d0ada9346415e6"
+source = "git+https://gitlab.com/micahscopes/hhhs-rs.git?rev=6a3a96ee88e570ce3004edd88672e63434986050#6a3a96ee88e570ce3004edd88672e63434986050"
 dependencies = [
  "blake3",
  "futures",

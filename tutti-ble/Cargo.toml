@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 blake3 = "=1.8.5"
-hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "833f7029925a9867b96325e5c6d0ada9346415e6", features = ["driver"] }
+hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "6a3a96ee88e570ce3004edd88672e63434986050", features = ["driver"] }
 thiserror = "2.0"
 tutti-session = { path = "../tutti-session" }
 
