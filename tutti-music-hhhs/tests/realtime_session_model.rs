@@ -420,7 +420,7 @@ fn upstream_session_predicts_reifies_repairs_and_recovers_tutti_effects() {
     let remove_view = materialize(&after_remove.history, &[root]).shared_pitches;
     assert!(remove_view.is_empty());
 
-    projection
+    let add_transition = projection
         .confirm(
             add_admission,
             DurableProjection::new(
@@ -433,11 +433,15 @@ fn upstream_session_predicts_reifies_repairs_and_recovers_tutti_effects() {
         )
         .unwrap()
         .unwrap();
+    assert!(matches!(
+        add_transition.change(),
+        SessionProjectionChange::Confirmed { .. }
+    ));
     assert!(
         projection.view().is_empty(),
         "pending remove remains applied"
     );
-    projection
+    let remove_transition = projection
         .confirm(
             remove_admission,
             DurableProjection::new(
@@ -450,6 +454,10 @@ fn upstream_session_predicts_reifies_repairs_and_recovers_tutti_effects() {
         )
         .unwrap()
         .unwrap();
+    assert!(matches!(
+        remove_transition.change(),
+        SessionProjectionChange::Confirmed { .. }
+    ));
     assert_eq!(projection.pending_len(), 0);
     assert!(projection.view().is_empty());
 

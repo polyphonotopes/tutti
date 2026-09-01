@@ -26,7 +26,7 @@ p2panda-core = "=0.7.0"
 # entry identity, the `Reach` ancestry contract + lazy oracle, and the bounded
 # windowed store. Every production tutti import is a floor symbol. The explicit
 # 0.4 tag keeps standalone Tutti and every embedding on one HHHS graph.
-hhhs-dag = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55", features = ["serde"] }
+hhhs-dag = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "a33046622a02e892f2bfee49604ad332956ed3be", features = ["serde"] }
 # Convergence digest + Merkle commitments.
 blake3 = "=1.8.5"
 # Canonical blake3-256 radix trie for `ops_root`/`prove_op` (feature `merkle`).
@@ -38,7 +38,7 @@ thiserror = "2.0"
 # the reference-oracle surface (feature `test-support`) and this crate's own tests,
 # never by production tutti. The same pinned 0.4 release as `hhhs-dag` keeps
 # `hhhs::EntryHash` unified with `hhhs_dag::EntryHash`.
-hhhs = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55", optional = true }
+hhhs = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "a33046622a02e892f2bfee49604ad332956ed3be", optional = true }
 
 # p2panda-core → ed25519-dalek → rand_core 0.6 → getrandom 0.2 must have the "js"
 # backend to COMPILE on wasm32-unknown-unknown (the crate's own compile_error).
@@ -53,7 +53,7 @@ getrandom = { version = "0.2", features = ["js"] }
 # equivalence tests can name `hhhs::cover::ReachIndex` / `hhhs::register` without the
 # `test-support` feature. Production builds still name only `hhhs-dag`.
 [dev-dependencies]
-hhhs = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "332ae1b5c5059a844cd468e52c8f6a3e5b0e9b55" }
+hhhs = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "a33046622a02e892f2bfee49604ad332956ed3be" }
 
 [[test]]
 name = "channel_algebra"
