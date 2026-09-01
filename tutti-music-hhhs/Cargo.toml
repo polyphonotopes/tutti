@@ -8,13 +8,13 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 tutti-music = { path = "../tutti-music" }
-hhhs = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "c5d4eca2396de9fc2325c94344c4371dd1c549e6" }
-hhhs-cap = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "c5d4eca2396de9fc2325c94344c4371dd1c549e6" }
-hhhs-proof = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "c5d4eca2396de9fc2325c94344c4371dd1c549e6" }
-hhhs-replica = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "c5d4eca2396de9fc2325c94344c4371dd1c549e6" }
-hhhs-session = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "c5d4eca2396de9fc2325c94344c4371dd1c549e6" }
-hhhs-store = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "c5d4eca2396de9fc2325c94344c4371dd1c549e6" }
-hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "c5d4eca2396de9fc2325c94344c4371dd1c549e6" }
+hhhs = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "833f7029925a9867b96325e5c6d0ada9346415e6" }
+hhhs-cap = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "833f7029925a9867b96325e5c6d0ada9346415e6" }
+hhhs-proof = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "833f7029925a9867b96325e5c6d0ada9346415e6" }
+hhhs-replica = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "833f7029925a9867b96325e5c6d0ada9346415e6" }
+hhhs-session = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "833f7029925a9867b96325e5c6d0ada9346415e6" }
+hhhs-store = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "833f7029925a9867b96325e5c6d0ada9346415e6" }
+hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "833f7029925a9867b96325e5c6d0ada9346415e6" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
@@ -22,5 +22,5 @@ thiserror = "2.0"
 [dev-dependencies]
 blake3 = "=1.8.5"
 futures = "0.3"
-hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "c5d4eca2396de9fc2325c94344c4371dd1c549e6", features = ["driver"] }
-hhhs-session = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "c5d4eca2396de9fc2325c94344c4371dd1c549e6", features = ["replica", "xchacha20poly1305"] }
+hhhs-sync = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "833f7029925a9867b96325e5c6d0ada9346415e6", features = ["driver"] }
+hhhs-session = { version = "0.4.5", git = "https://gitlab.com/micahscopes/hhhs-rs.git", rev = "833f7029925a9867b96325e5c6d0ada9346415e6", features = ["replica", "xchacha20poly1305"] }
